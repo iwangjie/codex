@@ -203,9 +203,17 @@ pub enum ResponseEvent {
         token_usage: Option<TokenUsage>,
     },
     OutputTextDelta(String),
-    ReasoningSummaryDelta(String),
-    ReasoningContentDelta(String),
-    ReasoningSummaryPartAdded,
+    ReasoningSummaryDelta {
+        delta: String,
+        summary_index: i64,
+    },
+    ReasoningContentDelta {
+        delta: String,
+        content_index: i64,
+    },
+    ReasoningSummaryPartAdded {
+        summary_index: i64,
+    },
     RateLimits(RateLimitSnapshot),
 }
 
@@ -340,21 +348,6 @@ pub(crate) mod tools {
         pub(crate) strict: bool,
         pub(crate) parameters: JsonSchema,
     }
-}
-
-pub(crate) fn create_reasoning_param_for_request(
-    model_family: &ModelFamily,
-    effort: Option<ReasoningEffortConfig>,
-    summary: ReasoningSummaryConfig,
-) -> Option<Reasoning> {
-    if !model_family.supports_reasoning_summaries {
-        return None;
-    }
-
-    Some(Reasoning {
-        effort,
-        summary: Some(summary),
-    })
 }
 
 pub(crate) fn create_text_param_for_request(
