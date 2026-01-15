@@ -151,7 +151,7 @@ impl ModelProviderInfo {
         let retry = ApiRetryConfig {
             max_attempts: self.request_max_retries(),
             base_delay: Duration::from_millis(200),
-            retry_429: false,
+            retry_429: true,
             retry_5xx: true,
             retry_transport: true,
         };
@@ -507,5 +507,27 @@ env_http_headers = { "X-Example-Env-Header" = "EXAMPLE_ENV_VAR" }
                 "expected {base_url} not to be detected as Azure"
             );
         }
+    }
+
+    #[test]
+    fn to_api_provider_enables_retry_429() {
+        let provider = ModelProviderInfo {
+            name: "test".into(),
+            base_url: Some("https://example.com".into()),
+            env_key: None,
+            env_key_instructions: None,
+            experimental_bearer_token: None,
+            wire_api: WireApi::Responses,
+            query_params: None,
+            http_headers: None,
+            env_http_headers: None,
+            request_max_retries: Some(4),
+            stream_max_retries: None,
+            stream_idle_timeout_ms: None,
+            requires_openai_auth: false,
+        };
+
+        let api = provider.to_api_provider(None).expect("api provider");
+        assert!(api.retry.retry_429);
     }
 }
