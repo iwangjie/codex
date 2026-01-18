@@ -567,6 +567,18 @@ pub struct Tui {
     /// scrollback in terminal multiplexers like Zellij that follow the xterm spec.
     #[serde(default)]
     pub alternate_screen: AltScreenMode,
+
+    /// Show per-message token usage after each assistant response.
+    /// When enabled, displays a detailed token breakdown card after each response.
+    /// Defaults to `false` to avoid UI clutter.
+    #[serde(default)]
+    pub show_per_message_tokens: bool,
+
+    /// Show detailed token breakdown in the `/status` command.
+    /// When enabled, displays cache hits, reasoning tokens, and per-message details.
+    /// Defaults to `true`.
+    #[serde(default = "default_true")]
+    pub show_token_details: bool,
 }
 
 const fn default_true() -> bool {

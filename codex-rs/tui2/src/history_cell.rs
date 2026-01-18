@@ -1771,6 +1771,88 @@ impl HistoryCell for FinalMessageSeparator {
     }
 }
 
+/// Displays per-message token usage information after an assistant response.
+/// Shows detailed breakdown of input, output, cached, and reasoning tokens.
+#[derive(Debug, Clone)]
+pub(crate) struct TokenUsageHistoryCell {
+    pub(crate) input_tokens: i64,
+    pub(crate) cached_input_tokens: i64,
+    pub(crate) output_tokens: i64,
+    pub(crate) reasoning_output_tokens: i64,
+    pub(crate) total_tokens: i64,
+    pub(crate) duration: Option<Duration>,
+}
+
+impl TokenUsageHistoryCell {
+    pub(crate) fn new(
+        usage: &codex_core::protocol::TokenUsage,
+        duration: Option<Duration>,
+    ) -> Self {
+        Self {
+            input_tokens: usage.input_tokens,
+            cached_input_tokens: usage.cached_input_tokens,
+            output_tokens: usage.output_tokens,
+            reasoning_output_tokens: usage.reasoning_output_tokens,
+            total_tokens: usage.total_tokens,
+            duration,
+        }
+    }
+
+    fn format_tokens(count: i64) -> String {
+        crate::status::format_tokens_compact(count)
+    }
+}
+
+impl HistoryCell for TokenUsageHistoryCell {
+    fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
+        let mut lines: Vec<Line<'static>> = Vec::new();
+
+        // Title line
+        let mut title_spans = vec![
+            Span::from("  ").dim(),
+            Span::from("Token usage for this response").dim(),
+        ];
+
+        if let Some(duration) = self.duration {
+            let duration_str = codex_common::elapsed::format_duration(duration);
+            title_spans.push(Span::from(format!(" ({duration_str})")).dim());
+        }
+
+        lines.push(Line::from(title_spans));
+
+        // Input tokens with cache breakdown
+        let input_display = if self.cached_input_tokens > 0 {
+            format!(
+                "  Input:        {} (+ {} cached)",
+                Self::format_tokens(self.input_tokens - self.cached_input_tokens),
+                Self::format_tokens(self.cached_input_tokens)
+            )
+        } else {
+            format!("  Input:        {}", Self::format_tokens(self.input_tokens))
+        };
+        lines.push(Line::from(input_display).dim());
+
+        // Output tokens with reasoning breakdown
+        let output_display = if self.reasoning_output_tokens > 0 {
+            format!(
+                "  Output:       {} ({} reasoning)",
+                Self::format_tokens(self.output_tokens),
+                Self::format_tokens(self.reasoning_output_tokens)
+            )
+        } else {
+            format!("  Output:       {}", Self::format_tokens(self.output_tokens))
+        };
+        lines.push(Line::from(output_display).dim());
+
+        // Total tokens
+        lines.push(
+            Line::from(format!("  Total:        {}", Self::format_tokens(self.total_tokens))).dim(),
+        );
+
+        lines
+    }
+}
+
 fn format_mcp_invocation<'a>(invocation: McpInvocation) -> Line<'a> {
     let args_str = invocation
         .arguments

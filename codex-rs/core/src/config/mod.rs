@@ -253,6 +253,14 @@ pub struct Config {
     /// - `never`: Never use alternate screen (inline mode, preserves scrollback).
     pub tui_alternate_screen: AltScreenMode,
 
+    /// Show per-message token usage after each assistant response.
+    /// This is the same `tui.show_per_message_tokens` value from `config.toml` (see [`Tui`]).
+    pub show_per_message_tokens: bool,
+
+    /// Show detailed token breakdown in the `/status` command.
+    /// This is the same `tui.show_token_details` value from `config.toml` (see [`Tui`]).
+    pub show_token_details: bool,
+
     /// The directory that should be treated as the current working directory
     /// for the session. All relative paths inside the business-logic layer are
     /// resolved against this path.
@@ -1591,6 +1599,16 @@ impl Config {
                 .as_ref()
                 .map(|t| t.alternate_screen)
                 .unwrap_or_default(),
+            show_per_message_tokens: cfg
+                .tui
+                .as_ref()
+                .map(|t| t.show_per_message_tokens)
+                .unwrap_or(false),
+            show_token_details: cfg
+                .tui
+                .as_ref()
+                .map(|t| t.show_token_details)
+                .unwrap_or(true),
             otel: {
                 let t: OtelConfigToml = cfg.otel.unwrap_or_default();
                 let log_user_prompt = t.log_user_prompt.unwrap_or(false);

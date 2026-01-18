@@ -418,6 +418,11 @@ pub(crate) struct ChatWidget {
     // show an empty divider. It is reset when the separator is emitted.
     had_work_activity: bool,
 
+    // Track turn start time for duration calculation
+    turn_start_time: Option<Instant>,
+    // Store last response token usage for per-message display
+    last_response_tokens: Option<TokenUsage>,
+
     last_rendered_width: std::cell::Cell<Option<usize>>,
     // Feedback sink for /feedback
     feedback: codex_feedback::CodexFeedback,
@@ -665,6 +670,20 @@ impl ChatWidget {
     fn on_task_complete(&mut self, last_agent_message: Option<String>) {
         // If a stream is currently active, finalize it.
         self.flush_answer_stream_with_separator();
+
+        // Insert per-message token usage cell if enabled
+        if self.config.show_per_message_tokens {
+            if let Some(last_tokens) = &self.last_response_tokens {
+                let duration = self.turn_start_time.map(|start| start.elapsed());
+                let token_cell = crate::history_cell::TokenUsageHistoryCell::new(last_tokens, duration);
+                self.add_to_history(token_cell);
+            }
+        }
+
+        // Reset turn tracking
+        self.turn_start_time = None;
+        self.last_response_tokens = None;
+
         // Mark task stopped and request redraw now that all content is in history.
         self.agent_turn_running = false;
         self.update_task_running_state();
@@ -1515,6 +1534,8 @@ impl ChatWidget {
             pre_review_token_info: None,
             needs_final_message_separator: false,
             had_work_activity: false,
+            turn_start_time: None,
+            last_response_tokens: None,
             last_rendered_width: std::cell::Cell::new(None),
             feedback,
             current_rollout_path: None,
@@ -1612,6 +1633,8 @@ impl ChatWidget {
             pre_review_token_info: None,
             needs_final_message_separator: false,
             had_work_activity: false,
+            turn_start_time: None,
+            last_response_tokens: None,
             last_rendered_width: std::cell::Cell::new(None),
             feedback,
             current_rollout_path: None,
@@ -2078,6 +2101,9 @@ impl ChatWidget {
                 tracing::error!("failed to send message: {e}");
             });
 
+        // Track turn start time for duration calculation
+        self.turn_start_time = Some(Instant::now());
+
         // Persist the text to cross-session message history.
         if !text.is_empty() {
             self.codex_op_tx
@@ -2156,8 +2182,13 @@ impl ChatWidget {
                 self.on_task_complete(last_agent_message)
             }
             EventMsg::TokenCount(ev) => {
-                self.set_token_info(ev.info);
+                self.set_token_info(ev.info.clone());
                 self.on_rate_limit_snapshot(ev.rate_limits);
+
+                // Track last response tokens for per-message display
+                if let Some(info) = &ev.info {
+                    self.last_response_tokens = Some(info.last_token_usage.clone());
+                }
             }
             EventMsg::Warning(WarningEvent { message }) => self.on_warning(message),
             EventMsg::Error(ErrorEvent { message, .. }) => self.on_error(message),

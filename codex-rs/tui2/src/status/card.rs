@@ -52,7 +52,19 @@ pub(crate) struct StatusTokenUsageData {
     total: i64,
     input: i64,
     output: i64,
+    cached_input: i64,
+    reasoning_output: i64,
     context_window: Option<StatusContextWindowData>,
+    last_response: Option<StatusLastResponseData>,
+}
+
+#[derive(Debug, Clone)]
+struct StatusLastResponseData {
+    input: i64,
+    cached_input: i64,
+    output: i64,
+    reasoning_output: i64,
+    total: i64,
 }
 
 #[derive(Debug)]
@@ -69,6 +81,7 @@ struct StatusHistoryCell {
     forked_from: Option<String>,
     token_usage: StatusTokenUsageData,
     rate_limits: StatusRateLimitData,
+    show_token_details: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -96,6 +109,7 @@ pub(crate) fn new_status_output(
         plan_type,
         now,
         model_name,
+        config.show_token_details,
     );
 
     CompositeHistoryCell::new(vec![Box::new(command), Box::new(card)])
@@ -114,6 +128,7 @@ impl StatusHistoryCell {
         plan_type: Option<PlanType>,
         now: DateTime<Local>,
         model_name: &str,
+        show_token_details: bool,
     ) -> Self {
         let config_entries = create_config_summary_entries(config, model_name);
         let (model_name, model_details) = compose_model_display(model_name, &config_entries);
@@ -150,11 +165,25 @@ impl StatusHistoryCell {
             window,
         });
 
+        let last_response = token_info.map(|info| {
+            let last = &info.last_token_usage;
+            StatusLastResponseData {
+                input: last.non_cached_input(),
+                cached_input: last.cached_input(),
+                output: last.output_tokens,
+                reasoning_output: last.reasoning_output_tokens,
+                total: last.blended_total(),
+            }
+        });
+
         let token_usage = StatusTokenUsageData {
             total: total_usage.blended_total(),
             input: total_usage.non_cached_input(),
             output: total_usage.output_tokens,
+            cached_input: total_usage.cached_input(),
+            reasoning_output: total_usage.reasoning_output_tokens,
             context_window,
+            last_response,
         };
         let rate_limits = compose_rate_limit_data(rate_limits, now);
 
@@ -171,6 +200,7 @@ impl StatusHistoryCell {
             forked_from,
             token_usage,
             rate_limits,
+            show_token_details,
         }
     }
 
@@ -190,6 +220,71 @@ impl StatusHistoryCell {
             Span::from(" output").dim(),
             Span::from(")").dim(),
         ]
+    }
+
+    fn token_usage_detail_lines(&self, formatter: &FieldFormatter) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+
+        // Cache hits detail
+        if self.token_usage.cached_input > 0 {
+            let cached_fmt = format_tokens_compact(self.token_usage.cached_input);
+            let total_input = self.token_usage.input + self.token_usage.cached_input;
+            let cache_percent = if total_input > 0 {
+                ((self.token_usage.cached_input as f64 / total_input as f64) * 100.0).round() as i64
+            } else {
+                0
+            };
+            lines.push(formatter.continuation(vec![
+                Span::from(format!("Cache hits: {} ({}% of input)", cached_fmt, cache_percent)).dim(),
+            ]));
+        }
+
+        // Reasoning tokens detail
+        if self.token_usage.reasoning_output > 0 {
+            let reasoning_fmt = format_tokens_compact(self.token_usage.reasoning_output);
+            let reasoning_percent = if self.token_usage.output > 0 {
+                ((self.token_usage.reasoning_output as f64 / self.token_usage.output as f64) * 100.0).round() as i64
+            } else {
+                0
+            };
+            lines.push(formatter.continuation(vec![
+                Span::from(format!("Reasoning: {} ({}% of output)", reasoning_fmt, reasoning_percent)).dim(),
+            ]));
+        }
+
+        lines
+    }
+
+    fn last_response_lines(&self, formatter: &FieldFormatter) -> Vec<Line<'static>> {
+        let Some(last) = &self.token_usage.last_response else {
+            return Vec::new();
+        };
+
+        let mut lines = Vec::new();
+        let total_fmt = format_tokens_compact(last.total);
+
+        let mut value_spans = vec![Span::from(total_fmt)];
+
+        // Add breakdown in parentheses
+        let input_fmt = format_tokens_compact(last.input);
+        let output_fmt = format_tokens_compact(last.output);
+
+        value_spans.push(Span::from(" (").dim());
+        value_spans.push(Span::from(input_fmt).dim());
+        if last.cached_input > 0 {
+            let cached_fmt = format_tokens_compact(last.cached_input);
+            value_spans.push(Span::from(format!(" + {} cached", cached_fmt)).dim());
+        }
+        value_spans.push(Span::from(" input, ").dim());
+        value_spans.push(Span::from(output_fmt).dim());
+        if last.reasoning_output > 0 {
+            let reasoning_fmt = format_tokens_compact(last.reasoning_output);
+            value_spans.push(Span::from(format!(" + {} reasoning", reasoning_fmt)).dim());
+        }
+        value_spans.push(Span::from(" output)").dim());
+
+        lines.push(formatter.line("Last response", value_spans));
+        lines
     }
 
     fn context_window_spans(&self) -> Option<Vec<Span<'static>>> {
@@ -421,6 +516,16 @@ impl HistoryCell for StatusHistoryCell {
         // Hide token usage only for ChatGPT subscribers
         if !matches!(self.account, Some(StatusAccountDisplay::ChatGpt { .. })) {
             lines.push(formatter.line("Token usage", self.token_usage_spans()));
+
+            // Add detailed token breakdown if enabled
+            if self.show_token_details {
+                lines.extend(self.token_usage_detail_lines(&formatter));
+            }
+
+            // Add last response details if available and details are enabled
+            if self.show_token_details {
+                lines.extend(self.last_response_lines(&formatter));
+            }
         }
 
         if let Some(spans) = self.context_window_spans() {
