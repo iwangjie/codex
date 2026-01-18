@@ -1781,6 +1781,7 @@ pub(crate) struct TokenUsageHistoryCell {
     pub(crate) reasoning_output_tokens: i64,
     pub(crate) total_tokens: i64,
     pub(crate) duration: Option<Duration>,
+    pub(crate) show_performance_metrics: bool,
 }
 
 impl TokenUsageHistoryCell {
@@ -1795,11 +1796,42 @@ impl TokenUsageHistoryCell {
             reasoning_output_tokens: usage.reasoning_output_tokens,
             total_tokens: usage.total_tokens,
             duration,
+            show_performance_metrics: false,
         }
+    }
+
+    pub(crate) fn with_performance_metrics(mut self, show: bool) -> Self {
+        self.show_performance_metrics = show;
+        self
     }
 
     fn format_tokens(count: i64) -> String {
         crate::status::format_tokens_compact(count)
+    }
+
+    fn calculate_tokens_per_second(&self) -> Option<f64> {
+        self.duration.and_then(|d| {
+            let secs = d.as_secs_f64();
+            if secs > 0.0 && self.output_tokens > 0 {
+                Some(self.output_tokens as f64 / secs)
+            } else {
+                None
+            }
+        })
+    }
+
+    fn format_cache_indicator(&self) -> Option<Span<'static>> {
+        if self.cached_input_tokens > 0 {
+            let total_input = self.input_tokens;
+            let cache_percent = if total_input > 0 {
+                ((self.cached_input_tokens as f64 / total_input as f64) * 100.0).round() as i64
+            } else {
+                0
+            };
+            Some(Span::from(format!(" ⚡ {}% cache hit", cache_percent)).dim())
+        } else {
+            None
+        }
     }
 }
 
@@ -1807,7 +1839,7 @@ impl HistoryCell for TokenUsageHistoryCell {
     fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
         let mut lines: Vec<Line<'static>> = Vec::new();
 
-        // Title line
+        // Title line with cache indicator
         let mut title_spans = vec![
             Span::from("  ").dim(),
             Span::from("Token usage for this response").dim(),
@@ -1818,14 +1850,34 @@ impl HistoryCell for TokenUsageHistoryCell {
             title_spans.push(Span::from(format!(" ({duration_str})")).dim());
         }
 
+        // Add cache indicator to title
+        if let Some(cache_indicator) = self.format_cache_indicator() {
+            title_spans.push(cache_indicator);
+        }
+
         lines.push(Line::from(title_spans));
+
+        // Performance metrics (if enabled)
+        if self.show_performance_metrics {
+            if let Some(tokens_per_sec) = self.calculate_tokens_per_second() {
+                lines.push(
+                    Line::from(format!("  Speed:        {:.0} tokens/sec", tokens_per_sec)).dim(),
+                );
+            }
+        }
 
         // Input tokens with cache breakdown
         let input_display = if self.cached_input_tokens > 0 {
+            let cache_percent = if self.input_tokens > 0 {
+                ((self.cached_input_tokens as f64 / self.input_tokens as f64) * 100.0).round() as i64
+            } else {
+                0
+            };
             format!(
-                "  Input:        {} (+ {} cached)",
+                "  Input:        {} (+ {} cached - {}% hit)",
                 Self::format_tokens(self.input_tokens - self.cached_input_tokens),
-                Self::format_tokens(self.cached_input_tokens)
+                Self::format_tokens(self.cached_input_tokens),
+                cache_percent
             )
         } else {
             format!("  Input:        {}", Self::format_tokens(self.input_tokens))
@@ -1834,10 +1886,16 @@ impl HistoryCell for TokenUsageHistoryCell {
 
         // Output tokens with reasoning breakdown
         let output_display = if self.reasoning_output_tokens > 0 {
+            let reasoning_percent = if self.output_tokens > 0 {
+                ((self.reasoning_output_tokens as f64 / self.output_tokens as f64) * 100.0).round() as i64
+            } else {
+                0
+            };
             format!(
-                "  Output:       {} ({} reasoning)",
+                "  Output:       {} ({} reasoning - {}%)",
                 Self::format_tokens(self.output_tokens),
-                Self::format_tokens(self.reasoning_output_tokens)
+                Self::format_tokens(self.reasoning_output_tokens),
+                reasoning_percent
             )
         } else {
             format!("  Output:       {}", Self::format_tokens(self.output_tokens))

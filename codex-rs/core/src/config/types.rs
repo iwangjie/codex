@@ -579,6 +579,11 @@ pub struct Tui {
     /// Defaults to `true`.
     #[serde(default = "default_true")]
     pub show_token_details: bool,
+
+    /// Show performance metrics (tokens/sec, speed) in token displays.
+    /// Defaults to `false`.
+    #[serde(default)]
+    pub show_performance_metrics: bool,
 }
 
 const fn default_true() -> bool {

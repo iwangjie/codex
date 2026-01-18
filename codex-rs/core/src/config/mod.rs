@@ -261,6 +261,10 @@ pub struct Config {
     /// This is the same `tui.show_token_details` value from `config.toml` (see [`Tui`]).
     pub show_token_details: bool,
 
+    /// Show performance metrics (tokens/sec, speed) in token displays.
+    /// This is the same `tui.show_performance_metrics` value from `config.toml` (see [`Tui`]).
+    pub show_performance_metrics: bool,
+
     /// The directory that should be treated as the current working directory
     /// for the session. All relative paths inside the business-logic layer are
     /// resolved against this path.
@@ -1609,6 +1613,11 @@ impl Config {
                 .as_ref()
                 .map(|t| t.show_token_details)
                 .unwrap_or(true),
+            show_performance_metrics: cfg
+                .tui
+                .as_ref()
+                .map(|t| t.show_performance_metrics)
+                .unwrap_or(false),
             otel: {
                 let t: OtelConfigToml = cfg.otel.unwrap_or_default();
                 let log_user_prompt = t.log_user_prompt.unwrap_or(false);

@@ -675,7 +675,8 @@ impl ChatWidget {
         if self.config.show_per_message_tokens {
             if let Some(last_tokens) = &self.last_response_tokens {
                 let duration = self.turn_start_time.map(|start| start.elapsed());
-                let token_cell = crate::history_cell::TokenUsageHistoryCell::new(last_tokens, duration);
+                let token_cell = crate::history_cell::TokenUsageHistoryCell::new(last_tokens, duration)
+                    .with_performance_metrics(self.config.show_performance_metrics);
                 self.add_to_history(token_cell);
             }
         }
