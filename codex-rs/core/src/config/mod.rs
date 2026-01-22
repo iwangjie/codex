@@ -42,6 +42,7 @@ use codex_app_server_protocol::Tools;
 use codex_app_server_protocol::UserSavedConfig;
 use codex_protocol::config_types::AltScreenMode;
 use codex_protocol::config_types::ForcedLoginMethod;
+use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::SandboxMode;
@@ -198,6 +199,9 @@ pub struct Config {
 
     /// Show startup tooltips in the TUI welcome screen.
     pub show_tooltips: bool,
+
+    /// Start the TUI in the specified collaboration mode (plan/execute/etc.).
+    pub experimental_mode: Option<ModeKind>,
 
     /// Controls whether the TUI uses the terminal's alternate screen buffer.
     ///
@@ -1572,6 +1576,7 @@ impl Config {
                 .unwrap_or_default(),
             animations: cfg.tui.as_ref().map(|t| t.animations).unwrap_or(true),
             show_tooltips: cfg.tui.as_ref().map(|t| t.show_tooltips).unwrap_or(true),
+            experimental_mode: cfg.tui.as_ref().and_then(|t| t.experimental_mode),
             tui_alternate_screen: cfg
                 .tui
                 .as_ref()
@@ -1839,6 +1844,7 @@ persistence = "none"
                 notifications: Notifications::Enabled(true),
                 animations: true,
                 show_tooltips: true,
+                experimental_mode: None,
                 alternate_screen: AltScreenMode::Auto,
             }
         );
@@ -3724,6 +3730,7 @@ model_verbosity = "high"
                 tui_notifications: Default::default(),
                 animations: true,
                 show_tooltips: true,
+                experimental_mode: None,
                 analytics_enabled: Some(true),
                 feedback_enabled: true,
                 tui_alternate_screen: AltScreenMode::Auto,
@@ -3804,6 +3811,7 @@ model_verbosity = "high"
             tui_notifications: Default::default(),
             animations: true,
             show_tooltips: true,
+            experimental_mode: None,
             analytics_enabled: Some(true),
             feedback_enabled: true,
             tui_alternate_screen: AltScreenMode::Auto,
@@ -3899,6 +3907,7 @@ model_verbosity = "high"
             tui_notifications: Default::default(),
             animations: true,
             show_tooltips: true,
+            experimental_mode: None,
             analytics_enabled: Some(false),
             feedback_enabled: true,
             tui_alternate_screen: AltScreenMode::Auto,
@@ -3980,6 +3989,7 @@ model_verbosity = "high"
             tui_notifications: Default::default(),
             animations: true,
             show_tooltips: true,
+            experimental_mode: None,
             analytics_enabled: Some(true),
             feedback_enabled: true,
             tui_alternate_screen: AltScreenMode::Auto,
