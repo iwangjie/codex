@@ -89,6 +89,7 @@ use codex_core::protocol::WebSearchBeginEvent;
 use codex_core::protocol::WebSearchEndEvent;
 use codex_core::skills::model::SkillInterface;
 use codex_core::skills::model::SkillMetadata;
+use codex_otel::OtelManager;
 use codex_protocol::ThreadId;
 use codex_protocol::account::PlanType;
 use codex_protocol::approvals::ElicitationRequestEvent;
@@ -96,6 +97,7 @@ use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::Settings;
 use codex_protocol::models::local_image_label_text;
 use codex_protocol::parse_command::ParsedCommand;
+use codex_protocol::request_user_input::RequestUserInputEvent;
 use codex_protocol::user_input::TextElement;
 use codex_protocol::user_input::UserInput;
 use crossterm::event::KeyCode;
@@ -358,6 +360,7 @@ pub(crate) struct ChatWidgetInit {
     pub(crate) feedback: codex_feedback::CodexFeedback,
     pub(crate) is_first_run: bool,
     pub(crate) model: Option<String>,
+    pub(crate) otel_manager: OtelManager,
 }
 
 #[derive(Default)]
@@ -412,6 +415,7 @@ pub(crate) struct ChatWidget {
     stored_collaboration_mode: CollaborationMode,
     auth_manager: Arc<AuthManager>,
     models_manager: Arc<ModelsManager>,
+    otel_manager: OtelManager,
     session_header: SessionHeader,
     initial_user_message: Option<UserMessage>,
     token_info: Option<TokenUsageInfo>,
@@ -484,6 +488,11 @@ pub(crate) struct ChatWidget {
     // This gates rendering of the "Worked for …" separator so purely conversational turns don't
     // show an empty divider. It is reset when the separator is emitted.
     had_work_activity: bool,
+    // Status-indicator elapsed seconds captured at the last emitted final-message separator.
+    //
+    // This lets the separator show per-chunk work time (since the previous separator) rather than
+    // the total task-running time reported by the status indicator.
+    last_separator_elapsed_secs: Option<u64>,
 
     last_rendered_width: std::cell::Cell<Option<usize>>,
     // Feedback sink for /feedback
@@ -1009,6 +1018,7 @@ impl ChatWidget {
         self.running_commands.clear();
         self.suppressed_exec_calls.clear();
         self.last_unified_wait = None;
+        self.unified_exec_wait_streak = None;
         self.clear_unified_exec_processes();
         self.stream_controller = None;
         self.maybe_show_pending_rate_limit_prompt();
@@ -1206,6 +1216,14 @@ impl ChatWidget {
         self.defer_or_handle(
             |q| q.push_elicitation(ev),
             |s| s.handle_elicitation_request_now(ev2),
+        );
+    }
+
+    fn on_request_user_input(&mut self, ev: RequestUserInputEvent) {
+        let ev2 = ev.clone();
+        self.defer_or_handle(
+            |q| q.push_user_input(ev),
+            |s| s.handle_request_user_input_now(ev2),
         );
     }
 
@@ -1519,6 +1537,7 @@ impl ChatWidget {
     #[inline]
     fn handle_streaming_delta(&mut self, delta: String) {
         // Before streaming agent content, flush any active exec cell group.
+        self.flush_unified_exec_wait_streak();
         self.flush_active_cell();
 
         if self.stream_controller.is_none() {
@@ -1528,7 +1547,8 @@ impl ChatWidget {
                 let elapsed_seconds = self
                     .bottom_pane
                     .status_widget()
-                    .map(super::status_indicator_widget::StatusIndicatorWidget::elapsed_seconds);
+                    .map(super::status_indicator_widget::StatusIndicatorWidget::elapsed_seconds)
+                    .map(|current| self.worked_elapsed_from(current));
                 self.add_to_history(history_cell::FinalMessageSeparator::new(elapsed_seconds));
                 self.needs_final_message_separator = false;
                 self.had_work_activity = false;
@@ -1546,6 +1566,17 @@ impl ChatWidget {
             self.app_event_tx.send(AppEvent::StartCommitAnimation);
         }
         self.request_redraw();
+    }
+
+    fn worked_elapsed_from(&mut self, current_elapsed: u64) -> u64 {
+        let baseline = match self.last_separator_elapsed_secs {
+            Some(last) if current_elapsed < last => 0,
+            Some(last) => last,
+            None => 0,
+        };
+        let elapsed = current_elapsed.saturating_sub(baseline);
+        self.last_separator_elapsed_secs = Some(current_elapsed);
+        elapsed
     }
 
     pub(crate) fn handle_exec_end_now(&mut self, ev: ExecCommandEndEvent) {
@@ -1676,6 +1707,12 @@ impl ChatWidget {
         self.request_redraw();
     }
 
+    pub(crate) fn handle_request_user_input_now(&mut self, ev: RequestUserInputEvent) {
+        self.flush_answer_stream_with_separator();
+        self.bottom_pane.push_user_input_request(ev);
+        self.request_redraw();
+    }
+
     pub(crate) fn handle_exec_begin_now(&mut self, ev: ExecCommandBeginEvent) {
         // Ensure the status indicator is visible while the command runs.
         self.running_commands.insert(
@@ -1799,6 +1836,7 @@ impl ChatWidget {
             feedback,
             is_first_run,
             model,
+            otel_manager,
         } = common;
         let model = model.filter(|m| !m.trim().is_empty());
         let mut config = config;
@@ -1850,6 +1888,7 @@ impl ChatWidget {
             stored_collaboration_mode,
             auth_manager,
             models_manager,
+            otel_manager,
             session_header: SessionHeader::new(model_for_header),
             initial_user_message,
             token_info: None,
@@ -1884,6 +1923,7 @@ impl ChatWidget {
             pre_review_token_info: None,
             needs_final_message_separator: false,
             had_work_activity: false,
+            last_separator_elapsed_secs: None,
             last_rendered_width: std::cell::Cell::new(None),
             feedback,
             current_rollout_path: None,
@@ -1917,6 +1957,7 @@ impl ChatWidget {
             models_manager,
             feedback,
             model,
+            otel_manager,
             ..
         } = common;
         let model = model.filter(|m| !m.trim().is_empty());
@@ -1964,6 +2005,7 @@ impl ChatWidget {
             stored_collaboration_mode,
             auth_manager,
             models_manager,
+            otel_manager,
             session_header: SessionHeader::new(header_model),
             initial_user_message,
             token_info: None,
@@ -1998,6 +2040,7 @@ impl ChatWidget {
             pre_review_token_info: None,
             needs_final_message_separator: false,
             had_work_activity: false,
+            last_separator_elapsed_secs: None,
             last_rendered_width: std::cell::Cell::new(None),
             feedback,
             current_rollout_path: None,
@@ -2279,11 +2322,17 @@ impl ChatWidget {
                         return;
                     }
 
+                    self.otel_manager.counter(
+                        "codex.windows_sandbox.setup_elevated_sandbox_command",
+                        1,
+                        &[],
+                    );
                     self.app_event_tx
                         .send(AppEvent::BeginWindowsSandboxElevatedSetup { preset });
                 }
                 #[cfg(not(target_os = "windows"))]
                 {
+                    let _ = &self.otel_manager;
                     // Not supported; on non-Windows this command should never be reachable.
                 };
             }
@@ -2674,6 +2723,9 @@ impl ChatWidget {
             EventMsg::ElicitationRequest(ev) => {
                 self.on_elicitation_request(ev);
             }
+            EventMsg::RequestUserInput(ev) => {
+                self.on_request_user_input(ev);
+            }
             EventMsg::ExecCommandBegin(ev) => self.on_exec_command_begin(ev),
             EventMsg::TerminalInteraction(delta) => self.on_terminal_interaction(delta),
             EventMsg::ExecCommandOutputDelta(delta) => self.on_exec_command_output_delta(delta),
@@ -2734,8 +2786,7 @@ impl ChatWidget {
             | EventMsg::ItemCompleted(_)
             | EventMsg::AgentMessageContentDelta(_)
             | EventMsg::ReasoningContentDelta(_)
-            | EventMsg::ReasoningRawContentDelta(_)
-            | EventMsg::RequestUserInput(_) => {}
+            | EventMsg::ReasoningRawContentDelta(_) => {}
         }
     }
 
@@ -3956,22 +4007,8 @@ impl ChatWidget {
             .is_some_and(|preset| {
                 Self::preset_matches_current(current_approval, current_sandbox, preset)
             });
-        let stay_actions = if stay_full_access {
-            Vec::new()
-        } else {
-            presets
-                .iter()
-                .find(|preset| preset.id == "read-only")
-                .map(|preset| {
-                    Self::approval_preset_actions(preset.approval, preset.sandbox.clone())
-                })
-                .unwrap_or_default()
-        };
-        let stay_label = if stay_full_access {
-            "Stay in Agent Full Access".to_string()
-        } else {
-            "Stay in Read-Only".to_string()
-        };
+        self.otel_manager
+            .counter("codex.windows_sandbox.elevated_prompt_shown", 1, &[]);
 
         let mut header = ColumnRenderable::new();
         header.push(*Box::new(
@@ -3984,11 +4021,39 @@ impl ChatWidget {
             .wrap(Wrap { trim: false }),
         ));
 
+        let stay_label = if stay_full_access {
+            "Stay in Agent Full Access".to_string()
+        } else {
+            "Stay in Read-Only".to_string()
+        };
+        let mut stay_actions = if stay_full_access {
+            Vec::new()
+        } else {
+            presets
+                .iter()
+                .find(|preset| preset.id == "read-only")
+                .map(|preset| {
+                    Self::approval_preset_actions(preset.approval, preset.sandbox.clone())
+                })
+                .unwrap_or_default()
+        };
+        stay_actions.insert(
+            0,
+            Box::new({
+                let otel = self.otel_manager.clone();
+                move |_tx| {
+                    otel.counter("codex.windows_sandbox.elevated_prompt_decline", 1, &[]);
+                }
+            }),
+        );
+
+        let accept_otel = self.otel_manager.clone();
         let items = vec![
             SelectionItem {
                 name: "Set up agent sandbox (requires elevation)".to_string(),
                 description: None,
                 actions: vec![Box::new(move |tx| {
+                    accept_otel.counter("codex.windows_sandbox.elevated_prompt_accept", 1, &[]);
                     tx.send(AppEvent::BeginWindowsSandboxElevatedSetup {
                         preset: preset.clone(),
                     });
@@ -4036,23 +4101,6 @@ impl ChatWidget {
             .is_some_and(|preset| {
                 Self::preset_matches_current(current_approval, current_sandbox, preset)
             });
-        let stay_actions = if stay_full_access {
-            Vec::new()
-        } else {
-            presets
-                .iter()
-                .find(|preset| preset.id == "read-only")
-                .map(|preset| {
-                    Self::approval_preset_actions(preset.approval, preset.sandbox.clone())
-                })
-                .unwrap_or_default()
-        };
-        let stay_label = if stay_full_access {
-            "Stay in Agent Full Access".to_string()
-        } else {
-            "Stay in Read-Only".to_string()
-        };
-
         let mut lines = Vec::new();
         lines.push(line!["Use Non-Elevated Sandbox?".bold()]);
         lines.push(line![""]);
@@ -4068,14 +4116,44 @@ impl ChatWidget {
 
         let elevated_preset = preset.clone();
         let legacy_preset = preset;
+        let stay_label = if stay_full_access {
+            "Stay in Agent Full Access".to_string()
+        } else {
+            "Stay in Read-Only".to_string()
+        };
+        let mut stay_actions = if stay_full_access {
+            Vec::new()
+        } else {
+            presets
+                .iter()
+                .find(|preset| preset.id == "read-only")
+                .map(|preset| {
+                    Self::approval_preset_actions(preset.approval, preset.sandbox.clone())
+                })
+                .unwrap_or_default()
+        };
+        stay_actions.insert(
+            0,
+            Box::new({
+                let otel = self.otel_manager.clone();
+                move |_tx| {
+                    otel.counter("codex.windows_sandbox.fallback_stay_current", 1, &[]);
+                }
+            }),
+        );
         let items = vec![
             SelectionItem {
                 name: "Try elevated agent sandbox setup again".to_string(),
                 description: None,
-                actions: vec![Box::new(move |tx| {
-                    tx.send(AppEvent::BeginWindowsSandboxElevatedSetup {
-                        preset: elevated_preset.clone(),
-                    });
+                actions: vec![Box::new({
+                    let otel = self.otel_manager.clone();
+                    let preset = elevated_preset;
+                    move |tx| {
+                        otel.counter("codex.windows_sandbox.fallback_retry_elevated", 1, &[]);
+                        tx.send(AppEvent::BeginWindowsSandboxElevatedSetup {
+                            preset: preset.clone(),
+                        });
+                    }
                 })],
                 dismiss_on_select: true,
                 ..Default::default()
@@ -4083,11 +4161,16 @@ impl ChatWidget {
             SelectionItem {
                 name: "Use non-elevated agent sandbox".to_string(),
                 description: None,
-                actions: vec![Box::new(move |tx| {
-                    tx.send(AppEvent::EnableWindowsSandboxForAgentMode {
-                        preset: legacy_preset.clone(),
-                        mode: WindowsSandboxEnableMode::Legacy,
-                    });
+                actions: vec![Box::new({
+                    let otel = self.otel_manager.clone();
+                    let preset = legacy_preset;
+                    move |tx| {
+                        otel.counter("codex.windows_sandbox.fallback_use_legacy", 1, &[]);
+                        tx.send(AppEvent::EnableWindowsSandboxForAgentMode {
+                            preset: preset.clone(),
+                            mode: WindowsSandboxEnableMode::Legacy,
+                        });
+                    }
                 })],
                 dismiss_on_select: true,
                 ..Default::default()

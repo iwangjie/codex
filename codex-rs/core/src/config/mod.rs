@@ -11,9 +11,7 @@ use crate::config::types::Notifications;
 use crate::config::types::OtelConfig;
 use crate::config::types::OtelConfigToml;
 use crate::config::types::OtelExporterKind;
-use crate::config::types::Personality;
 use crate::config::types::SandboxWorkspaceWrite;
-use crate::config::types::ScrollInputMode;
 use crate::config::types::ShellEnvironmentPolicy;
 use crate::config::types::ShellEnvironmentPolicyToml;
 use crate::config::types::SkillsConfig;
@@ -44,6 +42,7 @@ use codex_app_server_protocol::Tools;
 use codex_app_server_protocol::UserSavedConfig;
 use codex_protocol::config_types::AltScreenMode;
 use codex_protocol::config_types::ForcedLoginMethod;
+use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::SandboxMode;
 use codex_protocol::config_types::TrustLevel;
@@ -89,6 +88,7 @@ pub use codex_git::GhostSnapshotConfig;
 /// files are *silently truncated* to this size so we do not take up too much of
 /// the context window.
 pub(crate) const PROJECT_DOC_MAX_BYTES: usize = 32 * 1024; // 32 KiB
+pub(crate) const DEFAULT_AGENT_MAX_THREADS: Option<usize> = None;
 
 pub const CONFIG_TOML_FILE: &str = "config.toml";
 
@@ -199,58 +199,6 @@ pub struct Config {
     /// Show startup tooltips in the TUI welcome screen.
     pub show_tooltips: bool,
 
-    /// Override the events-per-wheel-tick factor for TUI2 scroll normalization.
-    ///
-    /// This is the same `tui.scroll_events_per_tick` value from `config.toml`, plumbed through the
-    /// merged [`Config`] object (see [`Tui`]) so TUI2 can normalize scroll event density per
-    /// terminal.
-    pub tui_scroll_events_per_tick: Option<u16>,
-
-    /// Override the number of lines applied per wheel tick in TUI2.
-    ///
-    /// This is the same `tui.scroll_wheel_lines` value from `config.toml` (see [`Tui`]). TUI2
-    /// applies it to wheel-like scroll streams. Trackpad-like scrolling uses a separate
-    /// `tui.scroll_trackpad_lines` setting.
-    pub tui_scroll_wheel_lines: Option<u16>,
-
-    /// Override the number of lines per tick-equivalent used for trackpad scrolling in TUI2.
-    ///
-    /// This is the same `tui.scroll_trackpad_lines` value from `config.toml` (see [`Tui`]).
-    pub tui_scroll_trackpad_lines: Option<u16>,
-
-    /// Trackpad acceleration: approximate number of events required to gain +1x speed in TUI2.
-    ///
-    /// This is the same `tui.scroll_trackpad_accel_events` value from `config.toml` (see [`Tui`]).
-    pub tui_scroll_trackpad_accel_events: Option<u16>,
-
-    /// Trackpad acceleration: maximum multiplier applied to trackpad-like streams in TUI2.
-    ///
-    /// This is the same `tui.scroll_trackpad_accel_max` value from `config.toml` (see [`Tui`]).
-    pub tui_scroll_trackpad_accel_max: Option<u16>,
-
-    /// Control how TUI2 interprets mouse scroll input (wheel vs trackpad).
-    ///
-    /// This is the same `tui.scroll_mode` value from `config.toml` (see [`Tui`]).
-    pub tui_scroll_mode: ScrollInputMode,
-
-    /// Override the wheel tick detection threshold (ms) for TUI2 auto scroll mode.
-    ///
-    /// This is the same `tui.scroll_wheel_tick_detect_max_ms` value from `config.toml` (see
-    /// [`Tui`]).
-    pub tui_scroll_wheel_tick_detect_max_ms: Option<u64>,
-
-    /// Override the wheel-like end-of-stream threshold (ms) for TUI2 auto scroll mode.
-    ///
-    /// This is the same `tui.scroll_wheel_like_max_duration_ms` value from `config.toml` (see
-    /// [`Tui`]).
-    pub tui_scroll_wheel_like_max_duration_ms: Option<u64>,
-
-    /// Invert mouse scroll direction for TUI2.
-    ///
-    /// This is the same `tui.scroll_invert` value from `config.toml` (see [`Tui`]) and is applied
-    /// consistently to both mouse wheels and trackpads.
-    pub tui_scroll_invert: bool,
-
     /// Controls whether the TUI uses the terminal's alternate screen buffer.
     ///
     /// This is the same `tui.alternate_screen` value from `config.toml` (see [`Tui`]).
@@ -310,6 +258,9 @@ pub struct Config {
 
     /// Token budget applied when storing tool/function outputs in the context manager.
     pub tool_output_token_limit: Option<usize>,
+
+    /// Maximum number of agent threads that can be open concurrently.
+    pub agent_max_threads: Option<usize>,
 
     /// Directory containing all Codex state (defaults to `~/.codex` but can be
     /// overridden by the `CODEX_HOME` environment variable).
@@ -936,6 +887,9 @@ pub struct ConfigToml {
     /// Nested tools section for feature toggles
     pub tools: Option<ToolsToml>,
 
+    /// Agent-related settings (thread limits, etc.).
+    pub agents: Option<AgentsToml>,
+
     /// User-level skill config entries keyed by SKILL.md path.
     pub skills: Option<SkillsConfig>,
 
@@ -1043,6 +997,15 @@ pub struct ToolsToml {
     /// Enable the `view_image` tool that lets the agent attach local images.
     #[serde(default)]
     pub view_image: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct AgentsToml {
+    /// Maximum number of agent threads that can be open concurrently.
+    /// When unset, no limit is enforced.
+    #[schemars(range(min = 1))]
+    pub max_threads: Option<usize>,
 }
 
 impl From<ToolsToml> for Tools {
@@ -1404,6 +1367,18 @@ impl Config {
 
         let history = cfg.history.unwrap_or_default();
 
+        let agent_max_threads = cfg
+            .agents
+            .as_ref()
+            .and_then(|agents| agents.max_threads)
+            .or(DEFAULT_AGENT_MAX_THREADS);
+        if agent_max_threads == Some(0) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "agents.max_threads must be at least 1",
+            ));
+        }
+
         let ghost_snapshot = {
             let mut config = GhostSnapshotConfig::default();
             if let Some(ghost_snapshot) = cfg.ghost_snapshot.as_ref()
@@ -1542,6 +1517,7 @@ impl Config {
                 })
                 .collect(),
             tool_output_token_limit: cfg.tool_output_token_limit,
+            agent_max_threads,
             codex_home,
             config_layer_stack,
             history,
@@ -1596,27 +1572,6 @@ impl Config {
                 .unwrap_or_default(),
             animations: cfg.tui.as_ref().map(|t| t.animations).unwrap_or(true),
             show_tooltips: cfg.tui.as_ref().map(|t| t.show_tooltips).unwrap_or(true),
-            tui_scroll_events_per_tick: cfg.tui.as_ref().and_then(|t| t.scroll_events_per_tick),
-            tui_scroll_wheel_lines: cfg.tui.as_ref().and_then(|t| t.scroll_wheel_lines),
-            tui_scroll_trackpad_lines: cfg.tui.as_ref().and_then(|t| t.scroll_trackpad_lines),
-            tui_scroll_trackpad_accel_events: cfg
-                .tui
-                .as_ref()
-                .and_then(|t| t.scroll_trackpad_accel_events),
-            tui_scroll_trackpad_accel_max: cfg
-                .tui
-                .as_ref()
-                .and_then(|t| t.scroll_trackpad_accel_max),
-            tui_scroll_mode: cfg.tui.as_ref().map(|t| t.scroll_mode).unwrap_or_default(),
-            tui_scroll_wheel_tick_detect_max_ms: cfg
-                .tui
-                .as_ref()
-                .and_then(|t| t.scroll_wheel_tick_detect_max_ms),
-            tui_scroll_wheel_like_max_duration_ms: cfg
-                .tui
-                .as_ref()
-                .and_then(|t| t.scroll_wheel_like_max_duration_ms),
-            tui_scroll_invert: cfg.tui.as_ref().map(|t| t.scroll_invert).unwrap_or(false),
             tui_alternate_screen: cfg
                 .tui
                 .as_ref()
@@ -1884,15 +1839,6 @@ persistence = "none"
                 notifications: Notifications::Enabled(true),
                 animations: true,
                 show_tooltips: true,
-                scroll_events_per_tick: None,
-                scroll_wheel_lines: None,
-                scroll_trackpad_lines: None,
-                scroll_trackpad_accel_events: None,
-                scroll_trackpad_accel_max: None,
-                scroll_mode: ScrollInputMode::Auto,
-                scroll_wheel_tick_detect_max_ms: None,
-                scroll_wheel_like_max_duration_ms: None,
-                scroll_invert: false,
                 alternate_screen: AltScreenMode::Auto,
             }
         );
@@ -3745,6 +3691,7 @@ model_verbosity = "high"
                 project_doc_max_bytes: PROJECT_DOC_MAX_BYTES,
                 project_doc_fallback_filenames: Vec::new(),
                 tool_output_token_limit: None,
+                agent_max_threads: None,
                 codex_home: fixture.codex_home(),
                 config_layer_stack: Default::default(),
                 history: History::default(),
@@ -3779,15 +3726,6 @@ model_verbosity = "high"
                 show_tooltips: true,
                 analytics_enabled: Some(true),
                 feedback_enabled: true,
-                tui_scroll_events_per_tick: None,
-                tui_scroll_wheel_lines: None,
-                tui_scroll_trackpad_lines: None,
-                tui_scroll_trackpad_accel_events: None,
-                tui_scroll_trackpad_accel_max: None,
-                tui_scroll_mode: ScrollInputMode::Auto,
-                tui_scroll_wheel_tick_detect_max_ms: None,
-                tui_scroll_wheel_like_max_duration_ms: None,
-                tui_scroll_invert: false,
                 tui_alternate_screen: AltScreenMode::Auto,
                 otel: OtelConfig::default(),
             },
@@ -3833,6 +3771,7 @@ model_verbosity = "high"
             project_doc_max_bytes: PROJECT_DOC_MAX_BYTES,
             project_doc_fallback_filenames: Vec::new(),
             tool_output_token_limit: None,
+            agent_max_threads: None,
             codex_home: fixture.codex_home(),
             config_layer_stack: Default::default(),
             history: History::default(),
@@ -3867,15 +3806,6 @@ model_verbosity = "high"
             show_tooltips: true,
             analytics_enabled: Some(true),
             feedback_enabled: true,
-            tui_scroll_events_per_tick: None,
-            tui_scroll_wheel_lines: None,
-            tui_scroll_trackpad_lines: None,
-            tui_scroll_trackpad_accel_events: None,
-            tui_scroll_trackpad_accel_max: None,
-            tui_scroll_mode: ScrollInputMode::Auto,
-            tui_scroll_wheel_tick_detect_max_ms: None,
-            tui_scroll_wheel_like_max_duration_ms: None,
-            tui_scroll_invert: false,
             tui_alternate_screen: AltScreenMode::Auto,
             otel: OtelConfig::default(),
         };
@@ -3936,6 +3866,7 @@ model_verbosity = "high"
             project_doc_max_bytes: PROJECT_DOC_MAX_BYTES,
             project_doc_fallback_filenames: Vec::new(),
             tool_output_token_limit: None,
+            agent_max_threads: None,
             codex_home: fixture.codex_home(),
             config_layer_stack: Default::default(),
             history: History::default(),
@@ -3970,15 +3901,6 @@ model_verbosity = "high"
             show_tooltips: true,
             analytics_enabled: Some(false),
             feedback_enabled: true,
-            tui_scroll_events_per_tick: None,
-            tui_scroll_wheel_lines: None,
-            tui_scroll_trackpad_lines: None,
-            tui_scroll_trackpad_accel_events: None,
-            tui_scroll_trackpad_accel_max: None,
-            tui_scroll_mode: ScrollInputMode::Auto,
-            tui_scroll_wheel_tick_detect_max_ms: None,
-            tui_scroll_wheel_like_max_duration_ms: None,
-            tui_scroll_invert: false,
             tui_alternate_screen: AltScreenMode::Auto,
             otel: OtelConfig::default(),
         };
@@ -4025,6 +3947,7 @@ model_verbosity = "high"
             project_doc_max_bytes: PROJECT_DOC_MAX_BYTES,
             project_doc_fallback_filenames: Vec::new(),
             tool_output_token_limit: None,
+            agent_max_threads: None,
             codex_home: fixture.codex_home(),
             config_layer_stack: Default::default(),
             history: History::default(),
@@ -4059,15 +3982,6 @@ model_verbosity = "high"
             show_tooltips: true,
             analytics_enabled: Some(true),
             feedback_enabled: true,
-            tui_scroll_events_per_tick: None,
-            tui_scroll_wheel_lines: None,
-            tui_scroll_trackpad_lines: None,
-            tui_scroll_trackpad_accel_events: None,
-            tui_scroll_trackpad_accel_max: None,
-            tui_scroll_mode: ScrollInputMode::Auto,
-            tui_scroll_wheel_tick_detect_max_ms: None,
-            tui_scroll_wheel_like_max_duration_ms: None,
-            tui_scroll_invert: false,
             tui_alternate_screen: AltScreenMode::Auto,
             otel: OtelConfig::default(),
         };
