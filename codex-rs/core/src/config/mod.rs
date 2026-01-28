@@ -38,6 +38,7 @@ use crate::project_doc::DEFAULT_PROJECT_DOC_FILENAME;
 use crate::project_doc::LOCAL_PROJECT_DOC_FILENAME;
 use crate::protocol::AskForApproval;
 use crate::protocol::SandboxPolicy;
+use crate::windows_sandbox::WindowsSandboxLevelExt;
 use codex_app_server_protocol::Tools;
 use codex_app_server_protocol::UserSavedConfig;
 use codex_protocol::config_types::AltScreenMode;
@@ -49,6 +50,7 @@ use codex_protocol::config_types::SandboxMode;
 use codex_protocol::config_types::TrustLevel;
 use codex_protocol::config_types::Verbosity;
 use codex_protocol::config_types::WebSearchMode;
+use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_rmcp_client::OAuthCredentialsStoreMode;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -89,7 +91,7 @@ pub use codex_git::GhostSnapshotConfig;
 /// files are *silently truncated* to this size so we do not take up too much of
 /// the context window.
 pub(crate) const PROJECT_DOC_MAX_BYTES: usize = 32 * 1024; // 32 KiB
-pub(crate) const DEFAULT_AGENT_MAX_THREADS: Option<usize> = None;
+pub(crate) const DEFAULT_AGENT_MAX_THREADS: Option<usize> = Some(6);
 
 pub const CONFIG_TOML_FILE: &str = "config.toml";
 
@@ -273,6 +275,9 @@ pub struct Config {
     /// Settings that govern if and what will be written to `~/.codex/history.jsonl`.
     pub history: History,
 
+    /// When true, session is not persisted on disk. Default to `false`
+    pub ephemeral: bool,
+
     /// Optional URI-based file opener. If set, citations to files in the model
     /// output will be hyperlinked using the specified URI scheme.
     pub file_opener: UriBasedFileOpener,
@@ -324,6 +329,9 @@ pub struct Config {
 
     /// Centralized feature flags; source of truth for feature gating.
     pub features: Features,
+
+    /// When `true`, suppress warnings about unstable (under development) features.
+    pub suppress_unstable_features_warning: bool,
 
     /// The active profile name used to derive this `Config` (if any).
     pub active_profile: Option<String>,
@@ -422,9 +430,21 @@ impl ConfigBuilder {
         // relative paths to absolute paths based on the parent folder of the
         // respective config file, so we should be safe to deserialize without
         // AbsolutePathBufGuard here.
-        let config_toml: ConfigToml = merged_toml
-            .try_into()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let config_toml: ConfigToml = match merged_toml.try_into() {
+            Ok(config_toml) => config_toml,
+            Err(err) => {
+                if let Some(config_error) =
+                    crate::config_loader::first_layer_config_error(&config_layer_stack).await
+                {
+                    return Err(crate::config_loader::io_error_from_config_error(
+                        std::io::ErrorKind::InvalidData,
+                        config_error,
+                        Some(err),
+                    ));
+                }
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, err));
+            }
+        };
         Config::load_config_with_layer_stack(
             config_toml,
             harness_overrides,
@@ -903,6 +923,9 @@ pub struct ConfigToml {
     #[schemars(schema_with = "crate::config::schema::features_schema")]
     pub features: Option<FeaturesToml>,
 
+    /// Suppress warnings about unstable (under development) features.
+    pub suppress_unstable_features_warning: Option<bool>,
+
     /// Settings for ghost snapshots (used for undo).
     #[serde(default)]
     pub ghost_snapshot: Option<GhostSnapshotToml>,
@@ -1047,6 +1070,7 @@ impl ConfigToml {
         &self,
         sandbox_mode_override: Option<SandboxMode>,
         profile_sandbox_mode: Option<SandboxMode>,
+        windows_sandbox_level: WindowsSandboxLevel,
         resolved_cwd: &Path,
     ) -> SandboxPolicyResolution {
         let resolved_sandbox_mode = sandbox_mode_override
@@ -1085,7 +1109,7 @@ impl ConfigToml {
         if cfg!(target_os = "windows")
             && matches!(resolved_sandbox_mode, SandboxMode::WorkspaceWrite)
             // If the experimental Windows sandbox is enabled, do not force a downgrade.
-            && crate::safety::get_platform_sandbox().is_none()
+            && windows_sandbox_level == codex_protocol::config_types::WindowsSandboxLevel::Disabled
         {
             sandbox_policy = SandboxPolicy::new_read_only_policy();
             forced_auto_mode_downgraded_on_windows = true;
@@ -1158,6 +1182,7 @@ pub struct ConfigOverrides {
     pub include_apply_patch_tool: Option<bool>,
     pub show_raw_agent_reasoning: Option<bool>,
     pub tools_web_search_request: Option<bool>,
+    pub ephemeral: Option<bool>,
     /// Additional directories that should be treated as writable roots for this session.
     pub additional_writable_roots: Vec<PathBuf>,
 }
@@ -1208,6 +1233,20 @@ fn resolve_web_search_mode(
     None
 }
 
+pub(crate) fn resolve_web_search_mode_for_turn(
+    explicit_mode: Option<WebSearchMode>,
+    sandbox_policy: &SandboxPolicy,
+) -> WebSearchMode {
+    if let Some(mode) = explicit_mode {
+        return mode;
+    }
+    if matches!(sandbox_policy, SandboxPolicy::DangerFullAccess) {
+        WebSearchMode::Live
+    } else {
+        WebSearchMode::Cached
+    }
+}
+
 impl Config {
     #[cfg(test)]
     fn load_from_base_config_with_overrides(
@@ -1246,6 +1285,7 @@ impl Config {
             include_apply_patch_tool: include_apply_patch_tool_override,
             show_raw_agent_reasoning,
             tools_web_search_request: override_tools_web_search_request,
+            ephemeral,
             additional_writable_roots,
         } = overrides;
 
@@ -1273,17 +1313,6 @@ impl Config {
         };
 
         let features = Features::from_config(&cfg, &config_profile, feature_overrides);
-        let web_search_mode = resolve_web_search_mode(&cfg, &config_profile, &features);
-        #[cfg(target_os = "windows")]
-        {
-            // Base flag controls sandbox on/off; elevated only applies when base is enabled.
-            let sandbox_enabled = features.enabled(Feature::WindowsSandbox);
-            crate::safety::set_windows_sandbox_enabled(sandbox_enabled);
-            let elevated_enabled =
-                sandbox_enabled && features.enabled(Feature::WindowsSandboxElevated);
-            crate::safety::set_windows_elevated_sandbox_enabled(elevated_enabled);
-        }
-
         let resolved_cwd = {
             use std::env;
 
@@ -1310,10 +1339,16 @@ impl Config {
             .get_active_project(&resolved_cwd)
             .unwrap_or(ProjectConfig { trust_level: None });
 
+        let windows_sandbox_level = WindowsSandboxLevel::from_features(&features);
         let SandboxPolicyResolution {
             policy: mut sandbox_policy,
             forced_auto_mode_downgraded_on_windows,
-        } = cfg.derive_sandbox_policy(sandbox_mode, config_profile.sandbox_mode, &resolved_cwd);
+        } = cfg.derive_sandbox_policy(
+            sandbox_mode,
+            config_profile.sandbox_mode,
+            windows_sandbox_level,
+            &resolved_cwd,
+        );
         if let SandboxPolicy::WorkspaceWrite { writable_roots, .. } = &mut sandbox_policy {
             for path in additional_writable_roots {
                 if !writable_roots.iter().any(|existing| existing == &path) {
@@ -1333,6 +1368,7 @@ impl Config {
                     AskForApproval::default()
                 }
             });
+        let web_search_mode = resolve_web_search_mode(&cfg, &config_profile, &features);
         // TODO(dylan): We should be able to leverage ConfigLayerStack so that
         // we can reliably check this at every config level.
         let did_user_set_custom_approval_policy_or_sandbox_mode = approval_policy_override
@@ -1530,6 +1566,7 @@ impl Config {
             codex_home,
             config_layer_stack,
             history,
+            ephemeral: ephemeral.unwrap_or_default(),
             file_opener: cfg.file_opener.unwrap_or(UriBasedFileOpener::VsCode),
             codex_linux_sandbox_exe,
 
@@ -1558,6 +1595,9 @@ impl Config {
             use_experimental_unified_exec_tool,
             ghost_snapshot,
             features,
+            suppress_unstable_features_warning: cfg
+                .suppress_unstable_features_warning
+                .unwrap_or(false),
             active_profile: active_profile_name,
             active_project,
             windows_wsl_setup_acknowledged: cfg.windows_wsl_setup_acknowledged.unwrap_or(false),
@@ -1667,7 +1707,6 @@ impl Config {
     }
 
     pub fn set_windows_sandbox_globally(&mut self, value: bool) {
-        crate::safety::set_windows_sandbox_enabled(value);
         if value {
             self.features.enable(Feature::WindowsSandbox);
         } else {
@@ -1677,7 +1716,6 @@ impl Config {
     }
 
     pub fn set_windows_elevated_sandbox_globally(&mut self, value: bool) {
-        crate::safety::set_windows_elevated_sandbox_enabled(value);
         if value {
             self.features.enable(Feature::WindowsSandboxElevated);
         } else {
@@ -1781,6 +1819,7 @@ mod tests {
             tool_timeout_sec: None,
             enabled_tools: None,
             disabled_tools: None,
+            scopes: None,
         }
     }
 
@@ -1798,6 +1837,7 @@ mod tests {
             tool_timeout_sec: None,
             enabled_tools: None,
             disabled_tools: None,
+            scopes: None,
         }
     }
 
@@ -1869,6 +1909,7 @@ network_access = false  # This should be ignored.
         let resolution = sandbox_full_access_cfg.derive_sandbox_policy(
             sandbox_mode_override,
             None,
+            WindowsSandboxLevel::Disabled,
             &PathBuf::from("/tmp/test"),
         );
         assert_eq!(
@@ -1892,6 +1933,7 @@ network_access = true  # This should be ignored.
         let resolution = sandbox_read_only_cfg.derive_sandbox_policy(
             sandbox_mode_override,
             None,
+            WindowsSandboxLevel::Disabled,
             &PathBuf::from("/tmp/test"),
         );
         assert_eq!(
@@ -1923,6 +1965,7 @@ exclude_slash_tmp = true
         let resolution = sandbox_workspace_write_cfg.derive_sandbox_policy(
             sandbox_mode_override,
             None,
+            WindowsSandboxLevel::Disabled,
             &PathBuf::from("/tmp/test"),
         );
         if cfg!(target_os = "windows") {
@@ -1971,6 +2014,7 @@ trust_level = "trusted"
         let resolution = sandbox_workspace_write_cfg.derive_sandbox_policy(
             sandbox_mode_override,
             None,
+            WindowsSandboxLevel::Disabled,
             &PathBuf::from("/tmp/test"),
         );
         if cfg!(target_os = "windows") {
@@ -2262,7 +2306,7 @@ trust_level = "trusted"
     }
 
     #[test]
-    fn web_search_mode_uses_none_if_unset() {
+    fn web_search_mode_defaults_to_none_if_unset() {
         let cfg = ConfigToml::default();
         let profile = ConfigProfile::default();
         let features = Features::with_defaults();
@@ -2300,6 +2344,30 @@ trust_level = "trusted"
             resolve_web_search_mode(&cfg, &profile, &features),
             Some(WebSearchMode::Disabled)
         );
+    }
+
+    #[test]
+    fn web_search_mode_for_turn_defaults_to_cached_when_unset() {
+        let mode = resolve_web_search_mode_for_turn(None, &SandboxPolicy::ReadOnly);
+
+        assert_eq!(mode, WebSearchMode::Cached);
+    }
+
+    #[test]
+    fn web_search_mode_for_turn_defaults_to_live_for_danger_full_access() {
+        let mode = resolve_web_search_mode_for_turn(None, &SandboxPolicy::DangerFullAccess);
+
+        assert_eq!(mode, WebSearchMode::Live);
+    }
+
+    #[test]
+    fn web_search_mode_for_turn_prefers_explicit_value() {
+        let mode = resolve_web_search_mode_for_turn(
+            Some(WebSearchMode::Cached),
+            &SandboxPolicy::DangerFullAccess,
+        );
+
+        assert_eq!(mode, WebSearchMode::Cached);
     }
 
     #[test]
@@ -2623,6 +2691,7 @@ profile = "project"
                 tool_timeout_sec: Some(Duration::from_secs(5)),
                 enabled_tools: None,
                 disabled_tools: None,
+                scopes: None,
             },
         );
 
@@ -2777,6 +2846,7 @@ bearer_token = "secret"
                 tool_timeout_sec: None,
                 enabled_tools: None,
                 disabled_tools: None,
+                scopes: None,
             },
         )]);
 
@@ -2846,6 +2916,7 @@ ZIG_VAR = "3"
                 tool_timeout_sec: None,
                 enabled_tools: None,
                 disabled_tools: None,
+                scopes: None,
             },
         )]);
 
@@ -2895,6 +2966,7 @@ ZIG_VAR = "3"
                 tool_timeout_sec: None,
                 enabled_tools: None,
                 disabled_tools: None,
+                scopes: None,
             },
         )]);
 
@@ -2942,6 +3014,7 @@ ZIG_VAR = "3"
                 tool_timeout_sec: None,
                 enabled_tools: None,
                 disabled_tools: None,
+                scopes: None,
             },
         )]);
 
@@ -3005,6 +3078,7 @@ startup_timeout_sec = 2.0
                 tool_timeout_sec: None,
                 enabled_tools: None,
                 disabled_tools: None,
+                scopes: None,
             },
         )]);
         apply_blocking(
@@ -3080,6 +3154,7 @@ X-Auth = "DOCS_AUTH"
                 tool_timeout_sec: None,
                 enabled_tools: None,
                 disabled_tools: None,
+                scopes: None,
             },
         )]);
 
@@ -3108,6 +3183,7 @@ X-Auth = "DOCS_AUTH"
                 tool_timeout_sec: None,
                 enabled_tools: None,
                 disabled_tools: None,
+                scopes: None,
             },
         );
         apply_blocking(
@@ -3174,6 +3250,7 @@ url = "https://example.com/mcp"
                     tool_timeout_sec: None,
                     enabled_tools: None,
                     disabled_tools: None,
+                    scopes: None,
                 },
             ),
             (
@@ -3192,6 +3269,7 @@ url = "https://example.com/mcp"
                     tool_timeout_sec: None,
                     enabled_tools: None,
                     disabled_tools: None,
+                    scopes: None,
                 },
             ),
         ]);
@@ -3273,6 +3351,7 @@ url = "https://example.com/mcp"
                 tool_timeout_sec: None,
                 enabled_tools: None,
                 disabled_tools: None,
+                scopes: None,
             },
         )]);
 
@@ -3316,6 +3395,7 @@ url = "https://example.com/mcp"
                 tool_timeout_sec: None,
                 enabled_tools: Some(vec!["allowed".to_string()]),
                 disabled_tools: Some(vec!["blocked".to_string()]),
+                scopes: None,
             },
         )]);
 
@@ -3702,10 +3782,11 @@ model_verbosity = "high"
                 project_doc_max_bytes: PROJECT_DOC_MAX_BYTES,
                 project_doc_fallback_filenames: Vec::new(),
                 tool_output_token_limit: None,
-                agent_max_threads: None,
+                agent_max_threads: DEFAULT_AGENT_MAX_THREADS,
                 codex_home: fixture.codex_home(),
                 config_layer_stack: Default::default(),
                 history: History::default(),
+                ephemeral: false,
                 file_opener: UriBasedFileOpener::VsCode,
                 codex_linux_sandbox_exe: None,
                 hide_agent_reasoning: false,
@@ -3726,6 +3807,7 @@ model_verbosity = "high"
                 use_experimental_unified_exec_tool: false,
                 ghost_snapshot: GhostSnapshotConfig::default(),
                 features: Features::with_defaults(),
+                suppress_unstable_features_warning: false,
                 active_profile: Some("o3".to_string()),
                 active_project: ProjectConfig { trust_level: None },
                 windows_wsl_setup_acknowledged: false,
@@ -3783,10 +3865,11 @@ model_verbosity = "high"
             project_doc_max_bytes: PROJECT_DOC_MAX_BYTES,
             project_doc_fallback_filenames: Vec::new(),
             tool_output_token_limit: None,
-            agent_max_threads: None,
+            agent_max_threads: DEFAULT_AGENT_MAX_THREADS,
             codex_home: fixture.codex_home(),
             config_layer_stack: Default::default(),
             history: History::default(),
+            ephemeral: false,
             file_opener: UriBasedFileOpener::VsCode,
             codex_linux_sandbox_exe: None,
             hide_agent_reasoning: false,
@@ -3807,6 +3890,7 @@ model_verbosity = "high"
             use_experimental_unified_exec_tool: false,
             ghost_snapshot: GhostSnapshotConfig::default(),
             features: Features::with_defaults(),
+            suppress_unstable_features_warning: false,
             active_profile: Some("gpt3".to_string()),
             active_project: ProjectConfig { trust_level: None },
             windows_wsl_setup_acknowledged: false,
@@ -3879,10 +3963,11 @@ model_verbosity = "high"
             project_doc_max_bytes: PROJECT_DOC_MAX_BYTES,
             project_doc_fallback_filenames: Vec::new(),
             tool_output_token_limit: None,
-            agent_max_threads: None,
+            agent_max_threads: DEFAULT_AGENT_MAX_THREADS,
             codex_home: fixture.codex_home(),
             config_layer_stack: Default::default(),
             history: History::default(),
+            ephemeral: false,
             file_opener: UriBasedFileOpener::VsCode,
             codex_linux_sandbox_exe: None,
             hide_agent_reasoning: false,
@@ -3903,6 +3988,7 @@ model_verbosity = "high"
             use_experimental_unified_exec_tool: false,
             ghost_snapshot: GhostSnapshotConfig::default(),
             features: Features::with_defaults(),
+            suppress_unstable_features_warning: false,
             active_profile: Some("zdr".to_string()),
             active_project: ProjectConfig { trust_level: None },
             windows_wsl_setup_acknowledged: false,
@@ -3961,10 +4047,11 @@ model_verbosity = "high"
             project_doc_max_bytes: PROJECT_DOC_MAX_BYTES,
             project_doc_fallback_filenames: Vec::new(),
             tool_output_token_limit: None,
-            agent_max_threads: None,
+            agent_max_threads: DEFAULT_AGENT_MAX_THREADS,
             codex_home: fixture.codex_home(),
             config_layer_stack: Default::default(),
             history: History::default(),
+            ephemeral: false,
             file_opener: UriBasedFileOpener::VsCode,
             codex_linux_sandbox_exe: None,
             hide_agent_reasoning: false,
@@ -3985,6 +4072,7 @@ model_verbosity = "high"
             use_experimental_unified_exec_tool: false,
             ghost_snapshot: GhostSnapshotConfig::default(),
             features: Features::with_defaults(),
+            suppress_unstable_features_warning: false,
             active_profile: Some("gpt5".to_string()),
             active_project: ProjectConfig { trust_level: None },
             windows_wsl_setup_acknowledged: false,
@@ -4165,7 +4253,12 @@ trust_level = "untrusted"
         let cfg = toml::from_str::<ConfigToml>(config_with_untrusted)
             .expect("TOML deserialization should succeed");
 
-        let resolution = cfg.derive_sandbox_policy(None, None, &PathBuf::from("/tmp/test"));
+        let resolution = cfg.derive_sandbox_policy(
+            None,
+            None,
+            WindowsSandboxLevel::Disabled,
+            &PathBuf::from("/tmp/test"),
+        );
 
         // Verify that untrusted projects get WorkspaceWrite (or ReadOnly on Windows due to downgrade)
         if cfg!(target_os = "windows") {
