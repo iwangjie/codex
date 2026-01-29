@@ -57,6 +57,12 @@ const EXEC_OUTPUT_MAX_BYTES: usize = 1024 * 1024; // 1 MiB
 /// Aggregation still collects full output; only the live event stream is capped.
 pub(crate) const MAX_EXEC_OUTPUT_DELTAS_PER_CALL: usize = 10_000;
 
+/// Time budget for draining remaining stdout/stderr once the child process has exited.
+///
+/// In rare cases, pipes can remain open because grandchildren inherited the file descriptors.
+/// We stop reading after this period of inactivity to avoid hanging forever.
+const IO_DRAIN_TIMEOUT: Duration = Duration::from_millis(2_000);
+
 #[derive(Debug)]
 pub struct ExecParams {
     pub command: Vec<String>,
@@ -713,15 +719,24 @@ async fn consume_truncated_output(
         ))
     })?;
 
+    // If the child spawns grandchildren that inherit its stdout/stderr file descriptors,
+    // those pipes can stay open after the direct child terminates. Historically we avoided
+    // hanging forever by waiting for a fixed timeout and then aborting the read tasks, but
+    // aborting discards any output already captured in the tasks' buffers. Instead, signal
+    // the readers to stop after a short period of inactivity once the child has exited.
+    let drain_after_exit = CancellationToken::new();
+
     let stdout_handle = tokio::spawn(read_capped(
         BufReader::new(stdout_reader),
         stdout_stream.clone(),
         false,
+        drain_after_exit.clone(),
     ));
     let stderr_handle = tokio::spawn(read_capped(
         BufReader::new(stderr_reader),
         stdout_stream.clone(),
         true,
+        drain_after_exit.clone(),
     ));
 
     let (exit_status, timed_out) = tokio::select! {
@@ -741,52 +756,14 @@ async fn consume_truncated_output(
         }
     };
 
-    // Wait for the stdout/stderr collection tasks but guard against them
-    // hanging forever. In the normal case, both pipes are closed once the child
-    // terminates so the tasks exit quickly. However, if the child process
-    // spawned grandchildren that inherited its stdout/stderr file descriptors
-    // those pipes may stay open after we `kill` the direct child on timeout.
-    // That would cause the `read_capped` tasks to block on `read()`
-    // indefinitely, effectively hanging the whole agent.
+    drain_after_exit.cancel();
 
-    const IO_DRAIN_TIMEOUT_MS: u64 = 2_000; // 2 s should be plenty for local pipes
-
-    // We need mutable bindings so we can `abort()` them on timeout.
-    use tokio::task::JoinHandle;
-
-    async fn await_with_timeout(
-        handle: &mut JoinHandle<std::io::Result<StreamOutput<Vec<u8>>>>,
-        timeout: Duration,
-    ) -> std::io::Result<StreamOutput<Vec<u8>>> {
-        match tokio::time::timeout(timeout, &mut *handle).await {
-            Ok(join_res) => match join_res {
-                Ok(io_res) => io_res,
-                Err(join_err) => Err(std::io::Error::other(join_err)),
-            },
-            Err(_elapsed) => {
-                // Timeout: abort the task to avoid hanging on open pipes.
-                handle.abort();
-                Ok(StreamOutput {
-                    text: Vec::new(),
-                    truncated_after_lines: None,
-                })
-            }
-        }
-    }
-
-    let mut stdout_handle = stdout_handle;
-    let mut stderr_handle = stderr_handle;
-
-    let stdout = await_with_timeout(
-        &mut stdout_handle,
-        Duration::from_millis(IO_DRAIN_TIMEOUT_MS),
-    )
-    .await?;
-    let stderr = await_with_timeout(
-        &mut stderr_handle,
-        Duration::from_millis(IO_DRAIN_TIMEOUT_MS),
-    )
-    .await?;
+    let stdout = stdout_handle
+        .await
+        .map_err(|join_err| CodexErr::Io(io::Error::other(join_err)))??;
+    let stderr = stderr_handle
+        .await
+        .map_err(|join_err| CodexErr::Io(io::Error::other(join_err)))??;
     let aggregated_output = aggregate_output(&stdout, &stderr);
 
     Ok(RawExecToolCallOutput {
@@ -802,13 +779,28 @@ async fn read_capped<R: AsyncRead + Unpin + Send + 'static>(
     mut reader: R,
     stream: Option<StdoutStream>,
     is_stderr: bool,
+    drain_after_exit: CancellationToken,
 ) -> io::Result<StreamOutput<Vec<u8>>> {
     let mut buf = Vec::with_capacity(AGGREGATE_BUFFER_INITIAL_CAPACITY.min(EXEC_OUTPUT_MAX_BYTES));
     let mut tmp = [0u8; READ_CHUNK_SIZE];
     let mut emitted_deltas: usize = 0;
+    let mut drain_mode = false;
 
     loop {
-        let n = reader.read(&mut tmp).await?;
+        let n = if drain_mode {
+            match tokio::time::timeout(IO_DRAIN_TIMEOUT, reader.read(&mut tmp)).await {
+                Ok(read_res) => read_res?,
+                Err(_elapsed) => break,
+            }
+        } else {
+            tokio::select! {
+                read_res = reader.read(&mut tmp) => read_res?,
+                _ = drain_after_exit.cancelled() => {
+                    drain_mode = true;
+                    continue;
+                }
+            }
+        };
         if n == 0 {
             break;
         }
@@ -934,8 +926,33 @@ mod tests {
             writer.write_all(&bytes).await.expect("write");
         });
 
-        let out = read_capped(reader, None, false).await.expect("read");
+        let out = read_capped(reader, None, false, CancellationToken::new())
+            .await
+            .expect("read");
         assert_eq!(out.text.len(), EXEC_OUTPUT_MAX_BYTES);
+    }
+
+    #[tokio::test]
+    async fn read_capped_preserves_output_when_pipe_stays_open_after_exit_signal() {
+        let (mut writer, reader) = tokio::io::duplex(1024);
+        let drain_after_exit = CancellationToken::new();
+
+        tokio::spawn(async move {
+            writer.write_all(b"hi\n").await.expect("write");
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+
+        drain_after_exit.cancel();
+
+        let out = tokio::time::timeout(
+            Duration::from_millis(2500),
+            read_capped(reader, None, false, drain_after_exit),
+        )
+        .await
+        .expect("read_capped should not hang")
+        .expect("read");
+
+        assert_eq!(out.text, b"hi\n");
     }
 
     #[test]
