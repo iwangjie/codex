@@ -154,6 +154,7 @@ use crate::protocol::WarningEvent;
 use crate::rollout::RolloutRecorder;
 use crate::rollout::RolloutRecorderParams;
 use crate::rollout::map_session_init_error;
+use crate::rollout::metadata;
 use crate::shell;
 use crate::shell_snapshot::ShellSnapshot;
 use crate::skills::SkillError;
@@ -165,6 +166,7 @@ use crate::skills::collect_explicit_skill_mentions;
 use crate::state::ActiveTurn;
 use crate::state::SessionServices;
 use crate::state::SessionState;
+use crate::state_db;
 use crate::tasks::GhostSnapshotTask;
 use crate::tasks::ReviewTask;
 use crate::tasks::SessionTask;
@@ -419,6 +421,10 @@ impl Codex {
     pub(crate) async fn thread_config_snapshot(&self) -> ThreadConfigSnapshot {
         let state = self.session.state.lock().await;
         state.session_configuration.thread_config_snapshot()
+    }
+
+    pub(crate) fn state_db(&self) -> Option<state_db::StateDbHandle> {
+        self.session.state_db()
     }
 }
 
@@ -699,6 +705,13 @@ impl Session {
                 RolloutRecorderParams::resume(resumed_history.rollout_path.clone()),
             ),
         };
+        let state_builder = match &initial_history {
+            InitialHistory::Resumed(resumed) => metadata::builder_from_items(
+                resumed.history.as_slice(),
+                resumed.rollout_path.as_path(),
+            ),
+            InitialHistory::New | InitialHistory::Forked(_) => None,
+        };
 
         // Kick off independent async setup tasks in parallel to reduce startup latency.
         //
@@ -707,11 +720,17 @@ impl Session {
         // - load history metadata
         let rollout_fut = async {
             if config.ephemeral {
-                Ok(None)
+                Ok::<_, anyhow::Error>((None, None))
             } else {
-                RolloutRecorder::new(&config, rollout_params)
-                    .await
-                    .map(Some)
+                let state_db_ctx = state_db::init_if_enabled(&config, None).await;
+                let rollout_recorder = RolloutRecorder::new(
+                    &config,
+                    rollout_params,
+                    state_db_ctx.clone(),
+                    state_builder.clone(),
+                )
+                .await?;
+                Ok((Some(rollout_recorder), state_db_ctx))
             }
         };
 
@@ -731,14 +750,14 @@ impl Session {
 
         // Join all independent futures.
         let (
-            rollout_recorder,
+            rollout_recorder_and_state_db,
             (history_log_id, history_entry_count),
             (auth, mcp_servers, auth_statuses),
         ) = tokio::join!(rollout_fut, history_meta_fut, auth_and_mcp_fut);
 
-        let rollout_recorder = rollout_recorder.map_err(|e| {
+        let (rollout_recorder, state_db_ctx) = rollout_recorder_and_state_db.map_err(|e| {
             error!("failed to initialize rollout recorder: {e:#}");
-            anyhow::Error::from(e)
+            e
         })?;
         let rollout_path = rollout_recorder
             .as_ref()
@@ -746,19 +765,13 @@ impl Session {
 
         let mut post_session_configured_events = Vec::<Event>::new();
 
-        for (alias, feature) in config.features.legacy_feature_usages() {
-            let canonical = feature.key();
-            let summary = format!("`{alias}` is deprecated. Use `[features].{canonical}` instead.");
-            let details = if alias == canonical {
-                None
-            } else {
-                Some(format!(
-                    "Enable it with `--enable {canonical}` or `[features].{canonical}` in config.toml. See https://github.com/openai/codex/blob/main/docs/config.md#feature-flags for details."
-                ))
-            };
+        for usage in config.features.legacy_feature_usages() {
             post_session_configured_events.push(Event {
                 id: INITIAL_SUBMIT_ID.to_owned(),
-                msg: EventMsg::DeprecationNotice(DeprecationNoticeEvent { summary, details }),
+                msg: EventMsg::DeprecationNotice(DeprecationNoticeEvent {
+                    summary: usage.summary.clone(),
+                    details: usage.details.clone(),
+                }),
             });
         }
         if crate::config::uses_deprecated_instructions_file(&config.config_layer_stack) {
@@ -842,6 +855,7 @@ impl Session {
             tool_approvals: Mutex::new(ApprovalStore::default()),
             skills_manager,
             agent_control,
+            state_db: state_db_ctx.clone(),
         };
 
         let sess = Arc::new(Session {
@@ -912,6 +926,10 @@ impl Session {
 
     pub(crate) fn get_tx_event(&self) -> Sender<Event> {
         self.tx_event.clone()
+    }
+
+    pub(crate) fn state_db(&self) -> Option<state_db::StateDbHandle> {
+        self.services.state_db.clone()
     }
 
     /// Ensure all rollout writes are durably flushed.
@@ -3133,13 +3151,13 @@ pub(crate) async fn run_turn(
     let model_info = turn_context.client.get_model_info();
     let auto_compact_limit = model_info.auto_compact_token_limit().unwrap_or(i64::MAX);
     let total_usage_tokens = sess.get_total_token_usage().await;
-    if total_usage_tokens >= auto_compact_limit {
-        run_auto_compact(&sess, &turn_context).await;
-    }
     let event = EventMsg::TurnStarted(TurnStartedEvent {
         model_context_window: turn_context.client.get_model_context_window(),
     });
     sess.send_event(&turn_context, event).await;
+    if total_usage_tokens >= auto_compact_limit {
+        run_auto_compact(&sess, &turn_context).await;
+    }
 
     let skills_outcome = Some(
         sess.services
@@ -4580,6 +4598,7 @@ mod tests {
             tool_approvals: Mutex::new(ApprovalStore::default()),
             skills_manager,
             agent_control,
+            state_db: None,
         };
 
         let turn_context = Session::make_turn_context(
@@ -4691,6 +4710,7 @@ mod tests {
             tool_approvals: Mutex::new(ApprovalStore::default()),
             skills_manager,
             agent_control,
+            state_db: None,
         };
 
         let turn_context = Arc::new(Session::make_turn_context(
