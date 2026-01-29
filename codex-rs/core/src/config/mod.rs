@@ -149,6 +149,9 @@ pub struct Config {
     pub forced_auto_mode_downgraded_on_windows: bool,
 
     pub shell_environment_policy: ShellEnvironmentPolicy,
+    /// When true, Unix shells are launched with interactive semantics (e.g.
+    /// `zsh -ilc`) so per-user rc files like `~/.zshrc` are loaded.
+    pub shell_interactive: bool,
 
     /// When `true`, `AgentReasoning` events emitted by the backend will be
     /// suppressed from the frontend output. This can reduce visual noise when
@@ -794,6 +797,13 @@ pub struct ConfigToml {
     #[serde(default)]
     pub shell_environment_policy: ShellEnvironmentPolicyToml,
 
+    /// When true, Unix shells are launched with interactive semantics (e.g.
+    /// `zsh -ilc`) so per-user rc files like `~/.zshrc` are loaded.
+    ///
+    /// This is opt-in because interactive rc files can be slow and may have
+    /// side effects (output, prompts, etc.).
+    pub shell_interactive: Option<bool>,
+
     /// Sandbox mode to use.
     pub sandbox_mode: Option<SandboxMode>,
 
@@ -1410,6 +1420,7 @@ impl Config {
             .clone();
 
         let shell_environment_policy = cfg.shell_environment_policy.into();
+        let shell_interactive = cfg.shell_interactive.unwrap_or(false);
 
         let history = cfg.history.unwrap_or_default();
 
@@ -1536,6 +1547,7 @@ impl Config {
             did_user_set_custom_approval_policy_or_sandbox_mode,
             forced_auto_mode_downgraded_on_windows,
             shell_environment_policy,
+            shell_interactive,
             notify: cfg.notify,
             user_instructions,
             base_instructions,
@@ -1903,6 +1915,9 @@ persistence = "none"
                 show_tooltips: true,
                 experimental_mode: None,
                 alternate_screen: AltScreenMode::Auto,
+                show_per_message_tokens: false,
+                show_token_details: true,
+                show_performance_metrics: false,
             }
         );
     }
@@ -3783,6 +3798,7 @@ model_verbosity = "high"
                 did_user_set_custom_approval_policy_or_sandbox_mode: true,
                 forced_auto_mode_downgraded_on_windows: false,
                 shell_environment_policy: ShellEnvironmentPolicy::default(),
+                shell_interactive: false,
                 user_instructions: None,
                 notify: None,
                 cwd: fixture.cwd(),
@@ -3834,6 +3850,9 @@ model_verbosity = "high"
                 analytics_enabled: Some(true),
                 feedback_enabled: true,
                 tui_alternate_screen: AltScreenMode::Auto,
+                show_per_message_tokens: false,
+                show_token_details: true,
+                show_performance_metrics: false,
                 otel: OtelConfig::default(),
             },
             o3_profile_config
@@ -3867,6 +3886,7 @@ model_verbosity = "high"
             did_user_set_custom_approval_policy_or_sandbox_mode: true,
             forced_auto_mode_downgraded_on_windows: false,
             shell_environment_policy: ShellEnvironmentPolicy::default(),
+            shell_interactive: false,
             user_instructions: None,
             notify: None,
             cwd: fixture.cwd(),
@@ -3918,6 +3938,9 @@ model_verbosity = "high"
             analytics_enabled: Some(true),
             feedback_enabled: true,
             tui_alternate_screen: AltScreenMode::Auto,
+            show_per_message_tokens: false,
+            show_token_details: true,
+            show_performance_metrics: false,
             otel: OtelConfig::default(),
         };
 
@@ -3966,6 +3989,7 @@ model_verbosity = "high"
             did_user_set_custom_approval_policy_or_sandbox_mode: true,
             forced_auto_mode_downgraded_on_windows: false,
             shell_environment_policy: ShellEnvironmentPolicy::default(),
+            shell_interactive: false,
             user_instructions: None,
             notify: None,
             cwd: fixture.cwd(),
@@ -4017,6 +4041,9 @@ model_verbosity = "high"
             analytics_enabled: Some(false),
             feedback_enabled: true,
             tui_alternate_screen: AltScreenMode::Auto,
+            show_per_message_tokens: false,
+            show_token_details: true,
+            show_performance_metrics: false,
             otel: OtelConfig::default(),
         };
 
@@ -4051,6 +4078,7 @@ model_verbosity = "high"
             did_user_set_custom_approval_policy_or_sandbox_mode: true,
             forced_auto_mode_downgraded_on_windows: false,
             shell_environment_policy: ShellEnvironmentPolicy::default(),
+            shell_interactive: false,
             user_instructions: None,
             notify: None,
             cwd: fixture.cwd(),
@@ -4102,6 +4130,9 @@ model_verbosity = "high"
             analytics_enabled: Some(true),
             feedback_enabled: true,
             tui_alternate_screen: AltScreenMode::Auto,
+            show_per_message_tokens: false,
+            show_token_details: true,
+            show_performance_metrics: false,
             otel: OtelConfig::default(),
         };
 

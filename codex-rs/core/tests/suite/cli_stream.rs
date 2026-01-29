@@ -151,7 +151,9 @@ async fn exec_cli_applies_model_instructions_file() {
         .arg("-c")
         .arg("model_provider=\"mock\"")
         .arg("-c")
-        .arg(format!("model_instructions_file=\"{custom_path_str}\""))
+        // Pass as a raw string (unquoted) so we avoid TOML string escaping/normalization issues
+        // across platforms.
+        .arg(format!("model_instructions_file={custom_path_str}"))
         .arg("-C")
         .arg(&repo_root)
         .arg("hello?\n");

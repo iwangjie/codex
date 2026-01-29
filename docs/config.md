@@ -28,6 +28,16 @@ Codex can run a notification hook when the agent finishes a turn. See the config
 
 The generated JSON Schema for `config.toml` lives at `codex-rs/core/config.schema.json`.
 
+## Shell initialization
+
+On macOS/Linux, Codex runs `shell_command` using your default shell (e.g. zsh). By default, commands run in non-interactive mode, so rc files like `~/.zshrc` may not be loaded.
+
+To force interactive semantics (for example to make your `~/.zshrc` aliases available), set:
+
+```toml
+shell_interactive = true
+```
+
 ## Notices
 
 Codex stores "do not show again" flags for some UI prompts under the `[notice]` table.

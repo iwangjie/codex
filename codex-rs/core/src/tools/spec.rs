@@ -408,6 +408,7 @@ Examples of valid command strings:
 - running an inline Python script: "@'\\nprint('Hello, world!')\\n'@ | python -"#
     } else {
         r#"Runs a shell command and returns its output.
+- Note: for zsh, login mode (`-l`) does not source `~/.zshrc` by default. To load aliases/functions from your rc file, set `shell_interactive = true` in `~/.codex/config.toml`.
 - Always set the `workdir` param when using the shell_command function. Do not use `cd` unless absolutely necessary."#
     }.to_string();
 
@@ -2471,6 +2472,7 @@ Examples of valid command strings:
 - running an inline Python script: "@'\\nprint('Hello, world!')\\n'@ | python -"#.to_string()
         } else {
             r#"Runs a shell command and returns its output.
+- Note: for zsh, login mode (`-l`) does not source `~/.zshrc` by default. To load aliases/functions from your rc file, set `shell_interactive = true` in `~/.codex/config.toml`.
 - Always set the `workdir` param when using the shell_command function. Do not use `cd` unless absolutely necessary."#.to_string()
         };
         assert_eq!(description, &expected);

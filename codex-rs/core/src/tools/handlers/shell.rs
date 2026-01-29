@@ -56,9 +56,14 @@ impl ShellHandler {
 }
 
 impl ShellCommandHandler {
-    fn base_command(shell: &Shell, command: &str, login: Option<bool>) -> Vec<String> {
+    fn base_command(
+        shell: &Shell,
+        command: &str,
+        login: Option<bool>,
+        use_interactive_shell: bool,
+    ) -> Vec<String> {
         let use_login_shell = login.unwrap_or(true);
-        shell.derive_exec_args(command, use_login_shell)
+        shell.derive_exec_args_with_interactive(command, use_login_shell, use_interactive_shell)
     }
 
     fn to_exec_params(
@@ -67,7 +72,12 @@ impl ShellCommandHandler {
         turn_context: &TurnContext,
     ) -> ExecParams {
         let shell = session.user_shell();
-        let command = Self::base_command(shell.as_ref(), &params.command, params.login);
+        let command = Self::base_command(
+            shell.as_ref(),
+            &params.command,
+            params.login,
+            turn_context.shell_interactive,
+        );
 
         ExecParams {
             command,
@@ -173,7 +183,12 @@ impl ToolHandler for ShellCommandHandler {
         serde_json::from_str::<ShellCommandToolCallParams>(arguments)
             .map(|params| {
                 let shell = invocation.session.user_shell();
-                let command = Self::base_command(shell.as_ref(), &params.command, params.login);
+                let command = Self::base_command(
+                    shell.as_ref(),
+                    &params.command,
+                    params.login,
+                    invocation.turn.shell_interactive,
+                );
                 !is_known_safe_command(&command)
             })
             .unwrap_or(true)
@@ -382,6 +397,16 @@ mod tests {
         assert!(is_known_safe_command(
             &shell.derive_exec_args(command, /* use_login_shell */ false)
         ));
+        assert!(is_known_safe_command(
+            &shell.derive_exec_args_with_interactive(
+                command, /* use_login_shell */ true, /* use_interactive_shell */ true
+            )
+        ));
+        assert!(is_known_safe_command(
+            &shell.derive_exec_args_with_interactive(
+                command, /* use_login_shell */ false, /* use_interactive_shell */ true
+            )
+        ));
     }
 
     #[tokio::test]
@@ -432,15 +457,23 @@ mod tests {
             shell_snapshot,
         };
 
-        let login_command =
-            ShellCommandHandler::base_command(&shell, "echo login shell", Some(true));
+        let login_command = ShellCommandHandler::base_command(
+            &shell,
+            "echo login shell",
+            Some(true),
+            /* use_interactive_shell */ false,
+        );
         assert_eq!(
             login_command,
             shell.derive_exec_args("echo login shell", true)
         );
 
-        let non_login_command =
-            ShellCommandHandler::base_command(&shell, "echo non login shell", Some(false));
+        let non_login_command = ShellCommandHandler::base_command(
+            &shell,
+            "echo non login shell",
+            Some(false),
+            /* use_interactive_shell */ false,
+        );
         assert_eq!(
             non_login_command,
             shell.derive_exec_args("echo non login shell", false)

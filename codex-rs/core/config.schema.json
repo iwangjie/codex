@@ -1020,6 +1020,21 @@
           "default": true,
           "description": "Enable desktop notifications from the TUI when the terminal is unfocused. Defaults to `true`."
         },
+        "show_per_message_tokens": {
+          "default": false,
+          "description": "Show per-message token usage after each assistant response. When enabled, displays a detailed token breakdown card after each response. Defaults to `false` to avoid UI clutter.",
+          "type": "boolean"
+        },
+        "show_performance_metrics": {
+          "default": false,
+          "description": "Show performance metrics (tokens/sec, speed) in token displays. Defaults to `false`.",
+          "type": "boolean"
+        },
+        "show_token_details": {
+          "default": true,
+          "description": "Show detailed token breakdown in the `/status` command. When enabled, displays cache hits, reasoning tokens, and per-message details. Defaults to `true`.",
+          "type": "boolean"
+        },
         "show_tooltips": {
           "default": true,
           "description": "Show startup tooltips in the TUI welcome screen. Defaults to `true`.",
@@ -1492,6 +1507,10 @@
         "inherit": null,
         "set": null
       }
+    },
+    "shell_interactive": {
+      "description": "When true, Unix shells are launched with interactive semantics (e.g. `zsh -ilc`) so per-user rc files like `~/.zshrc` are loaded.\n\nThis is opt-in because interactive rc files can be slow and may have side effects (output, prompts, etc.).",
+      "type": "boolean"
     },
     "show_raw_agent_reasoning": {
       "description": "When set to `true`, `AgentReasoningRawContentEvent` events will be shown in the UI/output. Defaults to `false`.",

@@ -40,8 +40,35 @@ impl Shell {
     /// Takes a string of shell and returns the full list of command args to
     /// use with `exec()` to run the shell command.
     pub fn derive_exec_args(&self, command: &str, use_login_shell: bool) -> Vec<String> {
+        self.derive_exec_args_with_interactive(command, use_login_shell, false)
+    }
+
+    /// Returns the list of args to use with `exec()` to run the shell command,
+    /// optionally forcing interactive shell semantics.
+    ///
+    /// On Unix, interactive mode is useful for shells like zsh where login
+    /// mode (`-l`) does not read `~/.zshrc` by default.
+    pub fn derive_exec_args_with_interactive(
+        &self,
+        command: &str,
+        use_login_shell: bool,
+        use_interactive_shell: bool,
+    ) -> Vec<String> {
         match self.shell_type {
-            ShellType::Zsh | ShellType::Bash | ShellType::Sh => {
+            ShellType::Zsh | ShellType::Bash => {
+                let arg = match (use_interactive_shell, use_login_shell) {
+                    (true, true) => "-ilc",
+                    (true, false) => "-ic",
+                    (false, true) => "-lc",
+                    (false, false) => "-c",
+                };
+                vec![
+                    self.shell_path.to_string_lossy().to_string(),
+                    arg.to_string(),
+                    command.to_string(),
+                ]
+            }
+            ShellType::Sh => {
                 let arg = if use_login_shell { "-lc" } else { "-c" };
                 vec![
                     self.shell_path.to_string_lossy().to_string(),
