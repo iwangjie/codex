@@ -36,6 +36,7 @@ use codex_core::config::ConstraintResult;
 use codex_core::config::types::Notifications;
 use codex_core::features::FEATURES;
 use codex_core::features::Feature;
+use codex_core::features::Stage;
 use codex_core::git_info::current_branch_name;
 use codex_core::git_info::local_git_branches;
 use codex_core::models_manager::manager::ModelsManager;
@@ -4092,15 +4093,30 @@ impl ChatWidget {
     pub(crate) fn open_experimental_popup(&mut self) {
         let features: Vec<ExperimentalFeatureItem> = FEATURES
             .iter()
-            .filter_map(|spec| {
-                let name = spec.stage.experimental_menu_name()?;
-                let description = spec.stage.experimental_menu_description()?;
-                Some(ExperimentalFeatureItem {
+            .map(|spec| {
+                let (name, description) = match spec.stage {
+                    Stage::Experimental {
+                        name,
+                        menu_description,
+                        ..
+                    } => (name.to_string(), menu_description.to_string()),
+                    Stage::UnderDevelopment => (
+                        spec.key.to_string(),
+                        "Under development feature.".to_string(),
+                    ),
+                    Stage::Stable => (spec.key.to_string(), "Stable feature.".to_string()),
+                    Stage::Deprecated => (spec.key.to_string(), "Deprecated feature.".to_string()),
+                    Stage::Removed => (
+                        spec.key.to_string(),
+                        "Removed feature (compat only).".to_string(),
+                    ),
+                };
+                ExperimentalFeatureItem {
                     feature: spec.id,
-                    name: name.to_string(),
-                    description: description.to_string(),
+                    name,
+                    description,
                     enabled: self.config.features.enabled(spec.id),
-                })
+                }
             })
             .collect();
 
