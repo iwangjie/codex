@@ -107,8 +107,10 @@ use super::file_search_popup::FileSearchPopup;
 use super::footer::CollaborationModeIndicator;
 use super::footer::FooterMode;
 use super::footer::FooterProps;
+use super::footer::MiniStatusIndicator;
 use super::footer::SummaryLeft;
 use super::footer::can_show_left_with_context;
+use super::footer::combine_right_indicators;
 use super::footer::context_window_line;
 use super::footer::esc_hint_mode;
 use super::footer::footer_height;
@@ -279,6 +281,7 @@ pub(crate) struct ChatComposer {
     footer_flash: Option<FooterFlash>,
     context_window_percent: Option<i64>,
     context_window_used_tokens: Option<i64>,
+    mini_status: Option<MiniStatusIndicator>,
     skills: Option<Vec<SkillMetadata>>,
     connectors_snapshot: Option<ConnectorsSnapshot>,
     dismissed_mention_popup_token: Option<String>,
@@ -369,6 +372,7 @@ impl ChatComposer {
             footer_flash: None,
             context_window_percent: None,
             context_window_used_tokens: None,
+            mini_status: None,
             skills: None,
             connectors_snapshot: None,
             dismissed_mention_popup_token: None,
@@ -2397,6 +2401,7 @@ impl ChatComposer {
             steer_enabled: self.steer_enabled,
             collaboration_modes_enabled: self.collaboration_modes_enabled,
             is_wsl,
+            mini_status: self.mini_status,
             context_window_percent: self.context_window_percent,
             context_window_used_tokens: self.context_window_used_tokens,
         }
@@ -2790,6 +2795,14 @@ impl ChatComposer {
         self.context_window_used_tokens = used_tokens;
     }
 
+    pub(crate) fn set_mini_status(&mut self, status: Option<MiniStatusIndicator>) -> bool {
+        if self.mini_status == status {
+            return false;
+        }
+        self.mini_status = status;
+        true
+    }
+
     pub(crate) fn set_esc_backtrack_hint(&mut self, show: bool) {
         self.esc_backtrack_hint = show;
         if show {
@@ -2888,7 +2901,10 @@ impl Renderable for ChatComposer {
                     footer_props.context_window_percent,
                     footer_props.context_window_used_tokens,
                 );
-                let context_width = context_line.width() as u16;
+                let right_min_width = footer_props
+                    .mini_status
+                    .map(|mini| mini.line().width() as u16)
+                    .unwrap_or_else(|| context_line.width() as u16);
                 let custom_height = self.custom_footer_height();
                 let footer_hint_height =
                     custom_height.unwrap_or_else(|| footer_height(footer_props));
@@ -2919,8 +2935,8 @@ impl Renderable for ChatComposer {
                         show_queue_hint,
                     )
                 };
-                let can_show_left_and_context =
-                    can_show_left_with_context(hint_rect, left_width, context_width);
+                let can_show_left_and_right =
+                    can_show_left_with_context(hint_rect, left_width, right_min_width);
                 let has_override =
                     self.footer_flash_visible() || self.footer_hint_override.is_some();
                 let single_line_layout = if has_override {
@@ -2934,7 +2950,7 @@ impl Renderable for ChatComposer {
                             // the context indicator on narrow widths.
                             Some(single_line_footer_layout(
                                 hint_rect,
-                                context_width,
+                                right_min_width,
                                 self.collaboration_mode_indicator,
                                 show_cycle_hint,
                                 show_shortcuts_hint,
@@ -2957,9 +2973,10 @@ impl Renderable for ChatComposer {
                     single_line_layout
                         .as_ref()
                         .map(|(_, show_context)| *show_context)
-                        .unwrap_or(can_show_left_and_context)
+                        .unwrap_or(can_show_left_and_right)
                 };
 
+                let mut rendered_left_width = left_width;
                 if let Some((summary_left, _)) = single_line_layout {
                     match summary_left {
                         SummaryLeft::Default => {
@@ -2974,6 +2991,7 @@ impl Renderable for ChatComposer {
                             );
                         }
                         SummaryLeft::Custom(line) => {
+                            rendered_left_width = line.width() as u16;
                             render_footer_line(hint_rect, buf, line);
                         }
                         SummaryLeft::None => {}
@@ -2997,7 +3015,22 @@ impl Renderable for ChatComposer {
                 }
 
                 if show_context {
-                    render_context_right(hint_rect, buf, &context_line);
+                    let right_line = if let Some(mini) = footer_props.mini_status {
+                        let combined = combine_right_indicators(context_line.clone(), mini);
+                        let combined_width = combined.width() as u16;
+                        if can_show_left_with_context(
+                            hint_rect,
+                            rendered_left_width,
+                            combined_width,
+                        ) {
+                            combined
+                        } else {
+                            mini.line()
+                        }
+                    } else {
+                        context_line
+                    };
+                    render_context_right(hint_rect, buf, &right_line);
                 }
             }
         }

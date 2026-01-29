@@ -149,6 +149,7 @@ use crate::bottom_pane::ExperimentalFeatureItem;
 use crate::bottom_pane::ExperimentalFeaturesView;
 use crate::bottom_pane::InputResult;
 use crate::bottom_pane::LocalImageAttachment;
+use crate::bottom_pane::MiniStatusIndicator;
 use crate::bottom_pane::QUIT_SHORTCUT_TIMEOUT;
 use crate::bottom_pane::SelectionAction;
 use crate::bottom_pane::SelectionItem;
@@ -483,6 +484,7 @@ pub(crate) struct ChatWidget {
     full_reasoning_buffer: String,
     // Current status header shown in the status indicator.
     current_status_header: String,
+    mini_status: Option<MiniStatusIndicator>,
     // Previous status header to restore after a transient stream retry.
     retry_status_header: Option<String>,
     thread_id: Option<ThreadId>,
@@ -698,8 +700,11 @@ impl ChatWidget {
     /// The bottom pane only has one running flag, but this module treats it as a derived state of
     /// both the agent turn lifecycle and MCP startup lifecycle.
     fn update_task_running_state(&mut self) {
-        self.bottom_pane
-            .set_task_running(self.agent_turn_running || self.mcp_startup_status.is_some());
+        let running = self.agent_turn_running || self.mcp_startup_status.is_some();
+        self.bottom_pane.set_task_running(running);
+        if !running {
+            self.set_mini_status(None);
+        }
     }
 
     fn restore_reasoning_status_header(&mut self) {
@@ -735,6 +740,46 @@ impl ChatWidget {
     fn set_status(&mut self, header: String, details: Option<String>) {
         self.current_status_header = header.clone();
         self.bottom_pane.update_status(header, details);
+    }
+
+    fn set_mini_status(&mut self, status: Option<MiniStatusIndicator>) {
+        if self.mini_status == status {
+            return;
+        }
+        self.mini_status = status;
+        self.bottom_pane.set_mini_status(status);
+    }
+
+    fn update_mini_status_for_event(&mut self, msg: &EventMsg) {
+        let status = match msg {
+            EventMsg::McpStartupUpdate(_) => Some(MiniStatusIndicator::Boot),
+            EventMsg::TurnStarted(_) => Some(MiniStatusIndicator::Api),
+            EventMsg::StreamError(_) => Some(MiniStatusIndicator::Retry),
+            EventMsg::ContextCompacted(_) => Some(MiniStatusIndicator::Context),
+            EventMsg::UndoStarted(_) => Some(MiniStatusIndicator::Undo),
+            EventMsg::ElicitationRequest(_) | EventMsg::RequestUserInput(_) => {
+                Some(MiniStatusIndicator::Ask)
+            }
+            EventMsg::WebSearchBegin(_) => Some(MiniStatusIndicator::Web),
+            EventMsg::McpToolCallBegin(_) => Some(MiniStatusIndicator::Tool),
+            EventMsg::PatchApplyBegin(_) => Some(MiniStatusIndicator::Patch),
+            EventMsg::ExecCommandBegin(_)
+            | EventMsg::TerminalInteraction(_)
+            | EventMsg::ExecCommandOutputDelta(_) => Some(MiniStatusIndicator::Exec),
+            EventMsg::AgentReasoningDelta(_)
+            | EventMsg::AgentReasoningRawContentDelta(_)
+            | EventMsg::ReasoningContentDelta(_)
+            | EventMsg::ReasoningRawContentDelta(_) => Some(MiniStatusIndicator::Reasoning),
+            EventMsg::AgentMessageDelta(_) | EventMsg::AgentMessageContentDelta(_) => {
+                Some(MiniStatusIndicator::Message)
+            }
+            EventMsg::TurnComplete(_)
+            | EventMsg::TurnAborted(_)
+            | EventMsg::Error(_)
+            | EventMsg::ShutdownComplete => None,
+            _ => return,
+        };
+        self.set_mini_status(status);
     }
 
     /// Convenience wrapper around [`Self::set_status`];
@@ -2081,6 +2126,7 @@ impl ChatWidget {
             reasoning_buffer: String::new(),
             full_reasoning_buffer: String::new(),
             current_status_header: String::from("Working"),
+            mini_status: None,
             retry_status_header: None,
             thread_id: None,
             forked_from: None,
@@ -2219,6 +2265,7 @@ impl ChatWidget {
             reasoning_buffer: String::new(),
             full_reasoning_buffer: String::new(),
             current_status_header: String::from("Working"),
+            mini_status: None,
             retry_status_header: None,
             thread_id: None,
             forked_from: None,
@@ -2346,6 +2393,7 @@ impl ChatWidget {
             reasoning_buffer: String::new(),
             full_reasoning_buffer: String::new(),
             current_status_header: String::from("Working"),
+            mini_status: None,
             retry_status_header: None,
             thread_id: None,
             forked_from: None,
@@ -3049,6 +3097,9 @@ impl ChatWidget {
         let is_stream_error = matches!(&msg, EventMsg::StreamError(_));
         if !is_stream_error {
             self.restore_retry_status_header_if_present();
+        }
+        if !from_replay {
+            self.update_mini_status_for_event(&msg);
         }
 
         match msg {

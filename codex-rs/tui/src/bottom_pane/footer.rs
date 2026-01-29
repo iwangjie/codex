@@ -62,6 +62,7 @@ pub(crate) struct FooterProps {
     pub(crate) steer_enabled: bool,
     pub(crate) collaboration_modes_enabled: bool,
     pub(crate) is_wsl: bool,
+    pub(crate) mini_status: Option<MiniStatusIndicator>,
     /// Which key the user must press again to quit.
     ///
     /// This is rendered when `mode` is `FooterMode::QuitShortcutReminder`.
@@ -79,6 +80,80 @@ pub(crate) enum CollaborationModeIndicator {
 }
 
 const MODE_CYCLE_HINT: &str = "shift+tab to cycle";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MiniStatusIndicator {
+    Boot,
+    Api,
+    Reasoning,
+    Message,
+    Exec,
+    Tool,
+    Patch,
+    Web,
+    Retry,
+    Context,
+    Ask,
+    Undo,
+}
+
+impl MiniStatusIndicator {
+    fn label(self) -> &'static str {
+        match self {
+            MiniStatusIndicator::Boot => "BOOT",
+            MiniStatusIndicator::Api => "API",
+            MiniStatusIndicator::Reasoning => "RSN",
+            MiniStatusIndicator::Message => "MSG",
+            MiniStatusIndicator::Exec => "EXEC",
+            MiniStatusIndicator::Tool => "TOOL",
+            MiniStatusIndicator::Patch => "PCH",
+            MiniStatusIndicator::Web => "WEB",
+            MiniStatusIndicator::Retry => "RTRY",
+            MiniStatusIndicator::Context => "CTX",
+            MiniStatusIndicator::Ask => "ASK",
+            MiniStatusIndicator::Undo => "UNDO",
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            MiniStatusIndicator::Boot => "^",
+            MiniStatusIndicator::Api => "~",
+            MiniStatusIndicator::Reasoning => ":",
+            MiniStatusIndicator::Message => ">",
+            MiniStatusIndicator::Exec => "!",
+            MiniStatusIndicator::Tool => "+",
+            MiniStatusIndicator::Patch => "*",
+            MiniStatusIndicator::Web => "?",
+            MiniStatusIndicator::Retry => "!",
+            MiniStatusIndicator::Context => "%",
+            MiniStatusIndicator::Ask => "?",
+            MiniStatusIndicator::Undo => "<",
+        }
+    }
+
+    pub(crate) fn line(self) -> Line<'static> {
+        let icon = match self {
+            MiniStatusIndicator::Retry => self.icon().red(),
+            MiniStatusIndicator::Exec | MiniStatusIndicator::Patch => self.icon().yellow(),
+            MiniStatusIndicator::Reasoning => self.icon().cyan(),
+            MiniStatusIndicator::Message => self.icon().green(),
+            _ => self.icon().dim(),
+        };
+        Line::from(vec![icon, " ".into(), self.label().dim()])
+    }
+}
+
+pub(crate) fn combine_right_indicators(
+    mut context_line: Line<'static>,
+    mini: MiniStatusIndicator,
+) -> Line<'static> {
+    if context_line.width() > 0 {
+        context_line.push_span(" · ".dim());
+    }
+    context_line.extend(mini.line().spans);
+    context_line
+}
 
 impl CollaborationModeIndicator {
     fn label(self, show_cycle_hint: bool) -> String {
@@ -1073,6 +1148,7 @@ mod tests {
                 steer_enabled: false,
                 collaboration_modes_enabled: false,
                 is_wsl: false,
+                mini_status: None,
                 quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
                 context_window_percent: None,
                 context_window_used_tokens: None,
@@ -1089,6 +1165,7 @@ mod tests {
                 steer_enabled: false,
                 collaboration_modes_enabled: false,
                 is_wsl: false,
+                mini_status: None,
                 quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
                 context_window_percent: None,
                 context_window_used_tokens: None,
@@ -1105,6 +1182,7 @@ mod tests {
                 steer_enabled: false,
                 collaboration_modes_enabled: true,
                 is_wsl: false,
+                mini_status: None,
                 quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
                 context_window_percent: None,
                 context_window_used_tokens: None,
@@ -1121,6 +1199,7 @@ mod tests {
                 steer_enabled: false,
                 collaboration_modes_enabled: false,
                 is_wsl: false,
+                mini_status: None,
                 quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
                 context_window_percent: None,
                 context_window_used_tokens: None,
@@ -1137,6 +1216,7 @@ mod tests {
                 steer_enabled: false,
                 collaboration_modes_enabled: false,
                 is_wsl: false,
+                mini_status: None,
                 quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
                 context_window_percent: None,
                 context_window_used_tokens: None,
@@ -1153,6 +1233,7 @@ mod tests {
                 steer_enabled: false,
                 collaboration_modes_enabled: false,
                 is_wsl: false,
+                mini_status: None,
                 quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
                 context_window_percent: None,
                 context_window_used_tokens: None,
@@ -1169,6 +1250,7 @@ mod tests {
                 steer_enabled: false,
                 collaboration_modes_enabled: false,
                 is_wsl: false,
+                mini_status: None,
                 quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
                 context_window_percent: None,
                 context_window_used_tokens: None,
@@ -1185,6 +1267,7 @@ mod tests {
                 steer_enabled: false,
                 collaboration_modes_enabled: false,
                 is_wsl: false,
+                mini_status: None,
                 quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
                 context_window_percent: Some(72),
                 context_window_used_tokens: None,
@@ -1201,6 +1284,7 @@ mod tests {
                 steer_enabled: false,
                 collaboration_modes_enabled: false,
                 is_wsl: false,
+                mini_status: None,
                 quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
                 context_window_percent: None,
                 context_window_used_tokens: Some(123_456),
@@ -1217,6 +1301,7 @@ mod tests {
                 steer_enabled: false,
                 collaboration_modes_enabled: false,
                 is_wsl: false,
+                mini_status: None,
                 quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
                 context_window_percent: None,
                 context_window_used_tokens: None,
@@ -1233,6 +1318,7 @@ mod tests {
                 steer_enabled: true,
                 collaboration_modes_enabled: false,
                 is_wsl: false,
+                mini_status: None,
                 quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
                 context_window_percent: None,
                 context_window_used_tokens: None,
@@ -1247,6 +1333,7 @@ mod tests {
             steer_enabled: false,
             collaboration_modes_enabled: true,
             is_wsl: false,
+            mini_status: None,
             quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
             context_window_percent: None,
             context_window_used_tokens: None,
@@ -1274,6 +1361,7 @@ mod tests {
             steer_enabled: false,
             collaboration_modes_enabled: true,
             is_wsl: false,
+            mini_status: None,
             quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
             context_window_percent: None,
             context_window_used_tokens: None,

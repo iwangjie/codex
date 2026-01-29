@@ -80,6 +80,7 @@ mod selection_popup_common;
 mod textarea;
 mod unified_exec_footer;
 pub(crate) use feedback_view::FeedbackNoteView;
+pub(crate) use footer::MiniStatusIndicator;
 
 /// How long the "press again to quit" hint stays visible.
 ///
@@ -587,6 +588,12 @@ impl BottomPane {
         self.composer
             .set_context_window(percent, self.context_window_used_tokens);
         self.request_redraw();
+    }
+
+    pub(crate) fn set_mini_status(&mut self, status: Option<MiniStatusIndicator>) {
+        if self.composer.set_mini_status(status) {
+            self.request_redraw();
+        }
     }
 
     /// Show a generic list selection view with the provided items.
