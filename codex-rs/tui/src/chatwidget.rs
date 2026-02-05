@@ -145,6 +145,7 @@ use crate::bottom_pane::BottomPane;
 use crate::bottom_pane::BottomPaneParams;
 use crate::bottom_pane::CancellationEvent;
 use crate::bottom_pane::CollaborationModeIndicator;
+use crate::bottom_pane::ColumnWidthMode;
 use crate::bottom_pane::DOUBLE_PRESS_QUIT_SHORTCUT_ENABLED;
 use crate::bottom_pane::ExperimentalFeatureItem;
 use crate::bottom_pane::ExperimentalFeaturesView;
@@ -3054,6 +3055,9 @@ impl ChatWidget {
             SlashCommand::Status => {
                 self.add_status_output();
             }
+            SlashCommand::DebugConfig => {
+                self.add_debug_config_output();
+            }
             SlashCommand::Ps => {
                 self.add_ps_output();
             }
@@ -3830,6 +3834,10 @@ impl ChatWidget {
             collaboration_mode,
             reasoning_effort_override,
         ));
+    }
+
+    pub(crate) fn add_debug_config_output(&mut self) {
+        self.add_to_history(crate::debug_config::new_debug_config_output(&self.config));
     }
 
     pub(crate) fn add_ps_output(&mut self) {
@@ -5564,6 +5572,7 @@ impl ChatWidget {
 
     fn personality_label(personality: Personality) -> &'static str {
         match personality {
+            Personality::None => "None",
             Personality::Friendly => "Friendly",
             Personality::Pragmatic => "Pragmatic",
         }
@@ -5571,6 +5580,7 @@ impl ChatWidget {
 
     fn personality_description(personality: Personality) -> &'static str {
         match personality {
+            Personality::None => "No personality instructions.",
             Personality::Friendly => "Warm, collaborative, and helpful.",
             Personality::Pragmatic => "Concise, task-focused, and direct.",
         }
@@ -5809,6 +5819,7 @@ impl ChatWidget {
             items,
             is_searchable: true,
             search_placeholder: Some("Type to search apps".to_string()),
+            col_width_mode: ColumnWidthMode::AutoAllRows,
             ..Default::default()
         });
     }
