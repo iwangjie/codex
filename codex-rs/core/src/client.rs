@@ -546,7 +546,8 @@ impl ModelClientSession {
             include,
             service_tier: match service_tier {
                 Some(ServiceTier::Fast) => Some("priority".to_string()),
-                _ => None,
+                Some(service_tier) => Some(service_tier.to_string()),
+                None => None,
             },
             prompt_cache_key,
             text,
@@ -566,7 +567,6 @@ impl ModelClientSession {
     ) -> ApiResponsesOptions {
         let turn_metadata_header = parse_turn_metadata_header(turn_metadata_header);
         let conversation_id = self.client.state.conversation_id.to_string();
-
         ApiResponsesOptions {
             conversation_id: Some(conversation_id),
             session_source: Some(self.client.state.session_source.clone()),

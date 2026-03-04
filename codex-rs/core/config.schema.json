@@ -365,6 +365,9 @@
             "image_detail_original": {
               "type": "boolean"
             },
+            "image_generation": {
+              "type": "boolean"
+            },
             "include_apply_patch_tool": {
               "type": "boolean"
             },
@@ -1336,7 +1339,8 @@
     },
     "ServiceTier": {
       "enum": [
-        "fast"
+        "fast",
+        "flex"
       ],
       "type": "string"
     },
@@ -1752,6 +1756,9 @@
         "image_detail_original": {
           "type": "boolean"
         },
+        "image_generation": {
+          "type": "boolean"
+        },
         "include_apply_patch_tool": {
           "type": "boolean"
         },
@@ -2146,7 +2153,7 @@
           "$ref": "#/definitions/ServiceTier"
         }
       ],
-      "description": "Optional explicit service tier preference for new turns."
+      "description": "Optional explicit service tier preference for new turns (`fast` or `flex`)."
     },
     "shell_environment_policy": {
       "allOf": [
