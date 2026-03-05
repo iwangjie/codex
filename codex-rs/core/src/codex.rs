@@ -55,12 +55,6 @@ use async_channel::Receiver;
 use async_channel::Sender;
 use chrono::Local;
 use chrono::Utc;
-use codex_artifact_presentation::PresentationArtifactError;
-use codex_artifact_presentation::PresentationArtifactExecutionRequest;
-use codex_artifact_presentation::PresentationArtifactResponse;
-use codex_artifact_spreadsheet::SpreadsheetArtifactError;
-use codex_artifact_spreadsheet::SpreadsheetArtifactRequest;
-use codex_artifact_spreadsheet::SpreadsheetArtifactResponse;
 use codex_hooks::HookEvent;
 use codex_hooks::HookEventAfterAgent;
 use codex_hooks::HookPayload;
@@ -130,6 +124,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use tracing::debug;
+use tracing::debug_span;
 use tracing::error;
 use tracing::field;
 use tracing::info;
@@ -359,7 +354,7 @@ impl Codex {
         let (tx_sub, rx_sub) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
         let (tx_event, rx_event) = async_channel::unbounded();
 
-        plugins_manager.plugins_for_config(&config);
+        let loaded_plugins = plugins_manager.plugins_for_config(&config);
         let loaded_skills = skills_manager.skills_for_config(&config);
 
         for err in &loaded_skills.errors {
@@ -396,8 +391,12 @@ impl Codex {
 
         let allowed_skills_for_implicit_invocation =
             loaded_skills.allowed_skills_for_implicit_invocation();
-        let user_instructions =
-            get_user_instructions(&config, Some(&allowed_skills_for_implicit_invocation)).await;
+        let user_instructions = get_user_instructions(
+            &config,
+            Some(&allowed_skills_for_implicit_invocation),
+            Some(loaded_plugins.capability_summaries()),
+        )
+        .await;
 
         let exec_policy = ExecPolicyManager::load(&config.config_layer_stack)
             .await
@@ -1796,24 +1795,6 @@ impl Session {
     pub(crate) async fn clear_connector_selection(&self) {
         let mut state = self.state.lock().await;
         state.clear_connector_selection();
-    }
-
-    pub(crate) async fn execute_presentation_artifact(
-        &self,
-        request: PresentationArtifactExecutionRequest,
-        cwd: &Path,
-    ) -> Result<PresentationArtifactResponse, PresentationArtifactError> {
-        let mut state = self.state.lock().await;
-        state.artifacts.presentation.execute_requests(request, cwd)
-    }
-
-    pub(crate) async fn execute_spreadsheet_artifact(
-        &self,
-        request: SpreadsheetArtifactRequest,
-        cwd: &Path,
-    ) -> Result<SpreadsheetArtifactResponse, SpreadsheetArtifactError> {
-        let mut state = self.state.lock().await;
-        state.artifacts.spreadsheet.execute(request, cwd)
     }
 
     async fn record_initial_history(&self, conversation_history: InitialHistory) {
@@ -3910,7 +3891,12 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
 }
 
 fn submission_dispatch_span(sub: &Submission) -> tracing::Span {
-    let dispatch_span = info_span!("submission_dispatch", submission.id = sub.id.as_str());
+    let dispatch_span = match &sub.op {
+        Op::RealtimeConversationAudio(_) => {
+            debug_span!("submission_dispatch", submission.id = sub.id.as_str())
+        }
+        _ => info_span!("submission_dispatch", submission.id = sub.id.as_str()),
+    };
     if let Some(trace) = sub.trace.as_ref()
         && !set_parent_from_w3c_trace_context(&dispatch_span, trace)
     {
@@ -5959,6 +5945,8 @@ fn realtime_text_for_event(msg: &EventMsg) -> Option<String> {
         | EventMsg::PatchApplyBegin(_)
         | EventMsg::PatchApplyEnd(_)
         | EventMsg::ViewImageToolCall(_)
+        | EventMsg::ImageGenerationBegin(_)
+        | EventMsg::ImageGenerationEnd(_)
         | EventMsg::ExecApprovalRequest(_)
         | EventMsg::RequestUserInput(_)
         | EventMsg::DynamicToolCallRequest(_)
@@ -6690,6 +6678,8 @@ mod tests {
     use codex_protocol::models::ResponseInputItem;
     use codex_protocol::models::ResponseItem;
     use codex_protocol::openai_models::ModelsResponse;
+    use codex_protocol::protocol::ConversationAudioParams;
+    use codex_protocol::protocol::RealtimeAudioFrame;
     use codex_protocol::protocol::Submission;
     use codex_protocol::protocol::W3cTraceContext;
     use opentelemetry::trace::TraceContextExt;
@@ -6710,6 +6700,7 @@ mod tests {
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::Arc;
+    use std::sync::Once;
     use std::time::Duration as StdDuration;
 
     struct InstructionsTestCase {
@@ -8176,10 +8167,16 @@ mod tests {
         })
     }
 
-    fn test_tracing_subscriber() -> impl tracing::Subscriber + Send + Sync {
-        let provider = SdkTracerProvider::builder().build();
-        let tracer = provider.tracer("codex-core-tests");
-        tracing_subscriber::registry().with(tracing_opentelemetry::layer().with_tracer(tracer))
+    fn init_test_tracing() {
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            let provider = SdkTracerProvider::builder().build();
+            let tracer = provider.tracer("codex-core-tests");
+            let subscriber = tracing_subscriber::registry()
+                .with(tracing_opentelemetry::layer().with_tracer(tracer));
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("global tracing subscriber should only be installed once");
+        });
     }
 
     async fn build_test_config(codex_home: &Path) -> Config {
@@ -8525,8 +8522,7 @@ mod tests {
             session: Arc::new(session),
         };
 
-        let subscriber = test_tracing_subscriber();
-        let _guard = tracing::subscriber::set_default(subscriber);
+        init_test_tracing();
 
         let request_parent = W3cTraceContext {
             traceparent: Some("00-00000000000000000000000000000011-0000000000000022-01".into()),
@@ -8560,8 +8556,7 @@ mod tests {
 
     #[test]
     fn submission_dispatch_span_prefers_submission_trace_context() {
-        let subscriber = test_tracing_subscriber();
-        let _guard = tracing::subscriber::set_default(subscriber);
+        init_test_tracing();
 
         let ambient_parent = W3cTraceContext {
             traceparent: Some("00-00000000000000000000000000000033-0000000000000044-01".into()),
@@ -8589,6 +8584,131 @@ mod tests {
         assert_eq!(
             trace_id,
             TraceId::from_hex("00000000000000000000000000000055").expect("trace id")
+        );
+    }
+
+    #[test]
+    fn submission_dispatch_span_uses_debug_for_realtime_audio() {
+        init_test_tracing();
+
+        let dispatch_span = submission_dispatch_span(&Submission {
+            id: "sub-1".into(),
+            op: Op::RealtimeConversationAudio(ConversationAudioParams {
+                frame: RealtimeAudioFrame {
+                    data: "ZmFrZQ==".into(),
+                    sample_rate: 16_000,
+                    num_channels: 1,
+                    samples_per_channel: Some(160),
+                },
+            }),
+            trace: None,
+        });
+
+        assert_eq!(
+            dispatch_span.metadata().expect("span metadata").level(),
+            &tracing::Level::DEBUG
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_task_turn_span_inherits_dispatch_trace_context() {
+        struct TraceCaptureTask {
+            captured_trace: Arc<std::sync::Mutex<Option<W3cTraceContext>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl SessionTask for TraceCaptureTask {
+            fn kind(&self) -> TaskKind {
+                TaskKind::Regular
+            }
+
+            fn span_name(&self) -> &'static str {
+                "session_task.trace_capture"
+            }
+
+            async fn run(
+                self: Arc<Self>,
+                _session: Arc<SessionTaskContext>,
+                _ctx: Arc<TurnContext>,
+                _input: Vec<UserInput>,
+                _cancellation_token: CancellationToken,
+            ) -> Option<String> {
+                let mut trace = self
+                    .captured_trace
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                *trace = current_span_w3c_trace_context();
+                None
+            }
+        }
+
+        init_test_tracing();
+
+        let request_parent = W3cTraceContext {
+            traceparent: Some("00-00000000000000000000000000000011-0000000000000022-01".into()),
+            tracestate: Some("vendor=value".into()),
+        };
+        let request_span = tracing::info_span!("app_server.request");
+        assert!(set_parent_from_w3c_trace_context(
+            &request_span,
+            &request_parent
+        ));
+
+        let submission_trace = async {
+            current_span_w3c_trace_context().expect("request span should have trace context")
+        }
+        .instrument(request_span)
+        .await;
+
+        let dispatch_span = submission_dispatch_span(&Submission {
+            id: "sub-1".into(),
+            op: Op::Interrupt,
+            trace: Some(submission_trace.clone()),
+        });
+        let dispatch_span_id = dispatch_span.context().span().span_context().span_id();
+
+        let (sess, tc, rx) = make_session_and_context_with_rx().await;
+        let captured_trace = Arc::new(std::sync::Mutex::new(None));
+
+        async {
+            sess.spawn_task(
+                Arc::clone(&tc),
+                vec![UserInput::Text {
+                    text: "hello".to_string(),
+                    text_elements: Vec::new(),
+                }],
+                TraceCaptureTask {
+                    captured_trace: Arc::clone(&captured_trace),
+                },
+            )
+            .await;
+        }
+        .instrument(dispatch_span)
+        .await;
+
+        let evt = tokio::time::timeout(StdDuration::from_secs(2), rx.recv())
+            .await
+            .expect("timeout waiting for turn completion")
+            .expect("event");
+        assert!(matches!(evt.msg, EventMsg::TurnComplete(_)));
+
+        let task_trace = captured_trace
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("turn task should capture the current span trace context");
+        let submission_context =
+            codex_otel::context_from_w3c_trace_context(&submission_trace).expect("submission");
+        let task_context =
+            codex_otel::context_from_w3c_trace_context(&task_trace).expect("task trace");
+
+        assert_eq!(
+            task_context.span().span_context().trace_id(),
+            submission_context.span().span_context().trace_id()
+        );
+        assert_ne!(
+            task_context.span().span_context().span_id(),
+            dispatch_span_id
         );
     }
 
@@ -9394,6 +9514,10 @@ mod tests {
     impl SessionTask for NeverEndingTask {
         fn kind(&self) -> TaskKind {
             self.kind
+        }
+
+        fn span_name(&self) -> &'static str {
+            "session_task.never_ending"
         }
 
         async fn run(
