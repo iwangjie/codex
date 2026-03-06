@@ -1360,9 +1360,7 @@ impl ChatWidget {
             self.app_event_tx.clone(),
             category,
             self.current_rollout_path.clone(),
-            snapshot
-                .feedback_diagnostics_attachment_text(true)
-                .is_some(),
+            snapshot.feedback_diagnostics(),
         );
         self.bottom_pane.show_selection_view(params);
         self.request_redraw();
@@ -2878,7 +2876,7 @@ impl ChatWidget {
             thread_label: None,
             server_name: ev.server_name,
             request_id: ev.id,
-            message: ev.message,
+            message: ev.request.message().to_string(),
         };
         self.bottom_pane
             .push_approval_request(request, &self.config.features);
