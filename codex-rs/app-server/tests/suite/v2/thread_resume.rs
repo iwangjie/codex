@@ -5,6 +5,7 @@ use app_test_support::create_fake_rollout_with_text_elements;
 use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_responses_server_repeating_assistant;
 use app_test_support::create_mock_responses_server_sequence;
+use app_test_support::create_mock_responses_server_sequence_unchecked;
 use app_test_support::create_shell_command_sse_response;
 use app_test_support::rollout_path;
 use app_test_support::to_response;
@@ -321,12 +322,8 @@ stream_max_retries = 0
         .join("\n")
             + "\n",
     )?;
-    let state_db = StateRuntime::init(
-        codex_home.path().to_path_buf(),
-        "mock_provider".into(),
-        None,
-    )
-    .await?;
+    let state_db =
+        StateRuntime::init(codex_home.path().to_path_buf(), "mock_provider".into()).await?;
     state_db.mark_backfill_complete(None).await?;
 
     let mut mcp = McpProcess::new(codex_home.path()).await?;
@@ -870,7 +867,7 @@ async fn thread_resume_replays_pending_command_execution_request_approval() -> R
         )?,
         create_final_assistant_message_sse_response("done")?,
     ];
-    let server = create_mock_responses_server_sequence(responses).await;
+    let server = create_mock_responses_server_sequence_unchecked(responses).await;
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
 

@@ -38,8 +38,8 @@ use codex_core::ExecPolicyError;
 use codex_core::check_execpolicy_for_warnings;
 use codex_core::config_loader::ConfigLoadError;
 use codex_core::config_loader::TextRange as CoreTextRange;
-use codex_core::features::Feature;
 use codex_feedback::CodexFeedback;
+use codex_protocol::protocol::SessionSource;
 use codex_state::log_db;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -59,12 +59,14 @@ use tracing_subscriber::util::SubscriberInitExt;
 mod app_server_tracing;
 mod bespoke_event_handling;
 mod codex_message_processor;
+mod command_exec;
 mod config_api;
 mod dynamic_tools;
 mod error_code;
 mod external_agent_config_api;
 mod filters;
 mod fuzzy_file_search;
+pub mod in_process;
 mod message_processor;
 mod models;
 mod outgoing_message;
@@ -499,18 +501,13 @@ pub async fn run_main_with_transport(
 
     let feedback_layer = feedback.logger_layer();
     let feedback_metadata_layer = feedback.metadata_layer();
-    let log_db = if config.features.enabled(Feature::Sqlite) {
-        codex_state::StateRuntime::init(
-            config.sqlite_home.clone(),
-            config.model_provider_id.clone(),
-            None,
-        )
-        .await
-        .ok()
-        .map(log_db::start)
-    } else {
-        None
-    };
+    let log_db = codex_state::StateRuntime::init(
+        config.sqlite_home.clone(),
+        config.model_provider_id.clone(),
+    )
+    .await
+    .ok()
+    .map(log_db::start);
     let log_db_layer = log_db
         .clone()
         .map(|layer| layer.with_filter(Targets::new().with_default(Level::TRACE)));
@@ -602,6 +599,8 @@ pub async fn run_main_with_transport(
             feedback: feedback.clone(),
             log_db,
             config_warnings,
+            session_source: SessionSource::VSCode,
+            enable_codex_api_key_env: false,
         });
         let mut thread_created_rx = processor.thread_created_receiver();
         let mut running_turn_count_rx = processor.subscribe_running_assistant_turn_count();
