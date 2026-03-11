@@ -205,6 +205,7 @@ async fn run_session_picker(
                             return Ok(sel);
                         }
                     }
+                    TuiEvent::Mouse(_) | TuiEvent::Paste(_) => {}
                     TuiEvent::Draw => {
                         if let Ok(size) = alt.tui.terminal.size() {
                             let list_height = size.height.saturating_sub(4) as usize;
@@ -213,7 +214,6 @@ async fn run_session_picker(
                         }
                         draw_picker(alt.tui, &state)?;
                     }
-                    _ => {}
                 }
             }
             Some(event) = background_events.next() => {

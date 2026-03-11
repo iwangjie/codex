@@ -14,12 +14,16 @@ use std::time::Duration;
 
 use crossterm::Command;
 use crossterm::SynchronizedUpdate;
+use crossterm::cursor::SetCursorStyle;
 use crossterm::event::DisableBracketedPaste;
 use crossterm::event::DisableFocusChange;
+use crossterm::event::DisableMouseCapture;
 use crossterm::event::EnableBracketedPaste;
 use crossterm::event::EnableFocusChange;
+use crossterm::event::EnableMouseCapture;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyboardEnhancementFlags;
+use crossterm::event::MouseEvent;
 use crossterm::event::PopKeyboardEnhancementFlags;
 use crossterm::event::PushKeyboardEnhancementFlags;
 use crossterm::terminal::EnterAlternateScreen;
@@ -78,7 +82,12 @@ pub fn set_modes() -> Result<()> {
         )
     );
 
-    let _ = execute!(stdout(), EnableFocusChange);
+    let _ = execute!(
+        stdout(),
+        EnableFocusChange,
+        EnableMouseCapture,
+        SetCursorStyle::SteadyBar
+    );
     Ok(())
 }
 
@@ -128,7 +137,12 @@ fn restore_common(should_disable_raw_mode: bool) -> Result<()> {
     // Pop may fail on platforms that didn't support the push; ignore errors.
     let _ = execute!(stdout(), PopKeyboardEnhancementFlags);
     execute!(stdout(), DisableBracketedPaste)?;
-    let _ = execute!(stdout(), DisableFocusChange);
+    let _ = execute!(
+        stdout(),
+        DisableFocusChange,
+        DisableMouseCapture,
+        SetCursorStyle::DefaultUserShape
+    );
     if should_disable_raw_mode {
         disable_raw_mode()?;
     }
@@ -234,6 +248,7 @@ fn set_panic_hook() {
 #[derive(Clone, Debug)]
 pub enum TuiEvent {
     Key(KeyEvent),
+    Mouse(MouseEvent),
     Paste(String),
     Draw,
 }

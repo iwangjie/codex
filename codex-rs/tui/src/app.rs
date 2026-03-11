@@ -85,6 +85,7 @@ use color_eyre::eyre::WrapErr;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
+use crossterm::event::MouseEvent;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
@@ -2084,6 +2085,9 @@ impl App {
                 TuiEvent::Key(key_event) => {
                     self.handle_key_event(tui, key_event).await;
                 }
+                TuiEvent::Mouse(mouse_event) => {
+                    self.handle_mouse_event(tui, mouse_event);
+                }
                 TuiEvent::Paste(pasted) => {
                     // Many terminals convert newlines to \r when pasting (e.g., iTerm2),
                     // but tui-textarea expects \n. Normalize CR to LF.
@@ -3805,6 +3809,11 @@ impl App {
                 self.chat_widget.handle_key_event(key_event);
             }
         };
+    }
+
+    fn handle_mouse_event(&mut self, tui: &mut tui::Tui, mouse_event: MouseEvent) {
+        self.chat_widget
+            .handle_mouse_event(tui.terminal.viewport_area, mouse_event);
     }
 
     fn refresh_status_line(&mut self) {

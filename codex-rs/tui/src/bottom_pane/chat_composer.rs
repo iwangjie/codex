@@ -135,6 +135,9 @@ use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
 use crossterm::event::KeyModifiers;
+use crossterm::event::MouseButton;
+use crossterm::event::MouseEvent;
+use crossterm::event::MouseEventKind;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Constraint;
 use ratatui::layout::Layout;
@@ -1344,6 +1347,30 @@ impl ChatComposer {
     /// Return true if either the slash-command popup or the file-search popup is active.
     pub(crate) fn popup_active(&self) -> bool {
         !matches!(self.active_popup, ActivePopup::None)
+    }
+
+    pub(crate) fn handle_mouse_event(&mut self, area: Rect, mouse_event: MouseEvent) -> bool {
+        if !matches!(mouse_event.kind, MouseEventKind::Down(MouseButton::Left))
+            || !self.input_enabled
+            || self.popup_active()
+        {
+            return false;
+        }
+
+        let [_, _, textarea_rect, _] = self.layout_areas(area);
+        let state = *self.textarea_state.borrow();
+        let moved = self.textarea.set_cursor_from_screen_position(
+            textarea_rect,
+            state,
+            mouse_event.column,
+            mouse_event.row,
+        );
+        if moved {
+            self.clear_remote_image_selection();
+            self.footer_mode = reset_mode_after_activity(self.footer_mode);
+            self.sync_popups();
+        }
+        moved
     }
 
     /// Handle key event when the slash-command popup is visible.
@@ -4494,6 +4521,9 @@ impl Drop for ChatComposer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::MouseButton;
+    use crossterm::event::MouseEvent;
+    use crossterm::event::MouseEventKind;
     use image::ImageBuffer;
     use image::Rgba;
     use pretty_assertions::assert_eq;
@@ -4642,6 +4672,75 @@ mod tests {
             !bottom_row.contains("FLASH"),
             "expected expired flash to be hidden, saw: {bottom_row:?}",
         );
+    }
+
+    #[test]
+    fn mouse_click_moves_cursor_only_inside_textarea() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            false,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+        composer.insert_str("abcd");
+
+        let area = Rect::new(0, 0, 20, 6);
+        let [_, _, textarea_rect, _] = composer.layout_areas(area);
+
+        assert!(composer.handle_mouse_event(
+            area,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: textarea_rect.x + 1,
+                row: textarea_rect.y,
+                modifiers: KeyModifiers::NONE,
+            },
+        ));
+        assert_eq!(composer.textarea.cursor(), 1);
+
+        assert!(!composer.handle_mouse_event(
+            area,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: textarea_rect.x.saturating_sub(1),
+                row: textarea_rect.y,
+                modifiers: KeyModifiers::NONE,
+            },
+        ));
+        assert_eq!(composer.textarea.cursor(), 1);
+    }
+
+    #[test]
+    fn mouse_click_is_ignored_while_popup_is_active() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            false,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+        composer.insert_str("/fi");
+        composer.sync_popups();
+        assert!(composer.popup_active());
+
+        let area = Rect::new(0, 0, 20, 8);
+        let [_, _, textarea_rect, _] = composer.layout_areas(area);
+
+        assert!(!composer.handle_mouse_event(
+            area,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: textarea_rect.x + 1,
+                row: textarea_rect.y,
+                modifiers: KeyModifiers::NONE,
+            },
+        ));
+        assert_eq!(composer.textarea.cursor(), composer.textarea.text().len());
     }
 
     fn snapshot_composer_state_with_width<F>(
