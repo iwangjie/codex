@@ -235,6 +235,38 @@ impl TextArea {
         Some((area.x + col, area.y + screen_row))
     }
 
+    pub fn set_cursor_from_screen_position(
+        &mut self,
+        area: Rect,
+        state: TextAreaState,
+        x: u16,
+        y: u16,
+    ) -> bool {
+        if area.is_empty() || x < area.x || y < area.y || x >= area.right() || y >= area.bottom() {
+            return false;
+        }
+
+        let target_pos = {
+            let lines = self.wrapped_lines(area.width);
+            if lines.is_empty() {
+                0
+            } else {
+                let effective_scroll = self.effective_scroll(area.height, &lines, state.scroll);
+                let row =
+                    usize::from(y.saturating_sub(area.y)).saturating_add(effective_scroll as usize);
+                let line_idx = row.min(lines.len().saturating_sub(1));
+                let line = &lines[line_idx];
+                let line_start = line.start;
+                let line_end = line.end.saturating_sub(1).max(line_start);
+                let target_col = usize::from(x.saturating_sub(area.x));
+                self.byte_pos_at_visual_column(line_start, line_end, target_col)
+            }
+        };
+        let previous = self.cursor_pos;
+        self.set_cursor(target_pos);
+        self.cursor_pos != previous
+    }
+
     pub fn is_empty(&self) -> bool {
         self.text.is_empty()
     }
@@ -269,6 +301,31 @@ impl TextArea {
         }
         self.cursor_pos = line_end;
         self.cursor_pos = self.clamp_pos_to_nearest_boundary(self.cursor_pos);
+    }
+
+    fn byte_pos_at_visual_column(
+        &self,
+        line_start: usize,
+        line_end: usize,
+        target_col: usize,
+    ) -> usize {
+        let mut width_so_far = 0usize;
+        for (offset, grapheme) in self.text[line_start..line_end].grapheme_indices(true) {
+            let start_col = width_so_far;
+            let end_col = start_col + grapheme.width();
+            if target_col <= start_col {
+                return line_start + offset;
+            }
+            if target_col < end_col {
+                return if target_col - start_col < end_col - target_col {
+                    line_start + offset
+                } else {
+                    line_start + offset + grapheme.len()
+                };
+            }
+            width_so_far = end_col;
+        }
+        line_end
     }
 
     fn beginning_of_line(&self, pos: usize) -> usize {
@@ -2169,6 +2226,40 @@ mod tests {
         ratatui::widgets::StatefulWidgetRef::render_ref(&(&t), area, &mut buf, &mut state);
         let (x1, y1) = t.cursor_pos_with_state(area, state).unwrap();
         assert_eq!((x1, y1), (2, 1));
+    }
+
+    #[test]
+    fn set_cursor_from_screen_position_moves_within_wrapped_text() {
+        let mut t = ta_with("abcd");
+        let area = Rect::new(0, 0, 2, 2);
+        let state = TextAreaState::default();
+
+        assert!(t.set_cursor_from_screen_position(area, state, 1, 0));
+        assert_eq!(t.cursor(), 1);
+
+        assert!(t.set_cursor_from_screen_position(area, state, 0, 1));
+        assert_eq!(t.cursor(), 2);
+
+        assert!(t.set_cursor_from_screen_position(area, state, 1, 1));
+        assert_eq!(t.cursor(), 3);
+    }
+
+    #[test]
+    fn set_cursor_from_screen_position_respects_scroll_and_wide_graphemes() {
+        let mut scrolled = ta_with("abcd");
+        let area = Rect::new(0, 0, 2, 1);
+        let _ = scrolled.desired_height(area.width);
+        let scrolled_state = TextAreaState { scroll: 1 };
+
+        assert!(scrolled.set_cursor_from_screen_position(area, scrolled_state, 0, 0));
+        assert_eq!(scrolled.cursor(), 2);
+
+        let mut wide = ta_with("你");
+        let wide_area = Rect::new(0, 0, 2, 1);
+        let wide_state = TextAreaState::default();
+
+        assert!(wide.set_cursor_from_screen_position(wide_area, wide_state, 0, 0));
+        assert_eq!(wide.cursor(), 0);
     }
 
     #[test]

@@ -152,6 +152,7 @@ use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
 use crossterm::event::KeyModifiers;
+use crossterm::event::MouseEvent;
 use rand::Rng;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -4437,6 +4438,20 @@ impl ChatWidget {
 
     pub(crate) fn handle_paste(&mut self, text: String) {
         self.bottom_pane.handle_paste(text);
+    }
+
+    pub(crate) fn handle_mouse_event(&mut self, area: Rect, mouse_event: MouseEvent) {
+        let bottom_pane_height = self
+            .bottom_pane
+            .desired_height(area.width)
+            .saturating_add(1);
+        let bottom_pane_height = bottom_pane_height.min(area.height);
+        let bottom_pane_y = area.bottom().saturating_sub(bottom_pane_height);
+        let bottom_pane_area = Rect::new(area.x, bottom_pane_y, area.width, bottom_pane_height)
+            .intersection(area)
+            .inner(ratatui::layout::Margin::new(0, 1));
+        self.bottom_pane
+            .handle_mouse_event(bottom_pane_area, mouse_event);
     }
 
     // Returns true if caller should skip rendering this frame (a future frame is scheduled).

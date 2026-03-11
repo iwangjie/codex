@@ -36,6 +36,7 @@ use codex_protocol::user_input::TextElement;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
+use crossterm::event::MouseEvent;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::text::Line;
@@ -498,6 +499,12 @@ impl BottomPane {
             if needs_redraw {
                 self.request_redraw();
             }
+        }
+    }
+
+    pub fn handle_mouse_event(&mut self, area: Rect, mouse_event: MouseEvent) {
+        if self.view_stack.is_empty() && self.composer.handle_mouse_event(area, mouse_event) {
+            self.request_redraw();
         }
     }
 
