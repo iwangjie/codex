@@ -35,15 +35,27 @@
         "calendar": {
           "type": "boolean"
         },
+        "contacts": {
+          "$ref": "#/definitions/MacOsContactsPermission"
+        },
+        "launchServices": {
+          "type": "boolean"
+        },
         "preferences": {
           "$ref": "#/definitions/MacOsPreferencesPermission"
+        },
+        "reminders": {
+          "type": "boolean"
         }
       },
       "required": [
         "accessibility",
         "automations",
         "calendar",
-        "preferences"
+        "contacts",
+        "launchServices",
+        "preferences",
+        "reminders"
       ],
       "type": "object"
     },
@@ -4366,9 +4378,15 @@
               "description": "Identifier for the collab tool call.",
               "type": "string"
             },
+            "model": {
+              "type": "string"
+            },
             "prompt": {
               "description": "Initial prompt sent to the agent. Can be empty to prevent CoT leaking at the beginning.",
               "type": "string"
+            },
+            "reasoning_effort": {
+              "$ref": "#/definitions/v2/ReasoningEffort"
             },
             "sender_thread_id": {
               "allOf": [
@@ -4388,7 +4406,9 @@
           },
           "required": [
             "call_id",
+            "model",
             "prompt",
+            "reasoning_effort",
             "sender_thread_id",
             "type"
           ],
@@ -5303,6 +5323,22 @@
             "null"
           ]
         },
+        "contacts": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MacOsContactsPermission"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "launchServices": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "preferences": {
           "anyOf": [
             {
@@ -5311,6 +5347,12 @@
             {
               "type": "null"
             }
+          ]
+        },
+        "reminders": {
+          "type": [
+            "boolean",
+            "null"
           ]
         }
       },
@@ -5573,6 +5615,14 @@
         }
       ]
     },
+    "MacOsContactsPermission": {
+      "enum": [
+        "none",
+        "read_only",
+        "read_write"
+      ],
+      "type": "string"
+    },
     "MacOsPreferencesPermission": {
       "enum": [
         "none",
@@ -5599,6 +5649,18 @@
           "default": false,
           "type": "boolean"
         },
+        "macos_contacts": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/MacOsContactsPermission"
+            }
+          ],
+          "default": "none"
+        },
+        "macos_launch_services": {
+          "default": false,
+          "type": "boolean"
+        },
         "macos_preferences": {
           "allOf": [
             {
@@ -5606,6 +5668,10 @@
             }
           ],
           "default": "read_only"
+        },
+        "macos_reminders": {
+          "default": false,
+          "type": "boolean"
         }
       },
       "type": "object"
@@ -6852,6 +6918,11 @@
         },
         "sandbox_approval": {
           "description": "Reject approval prompts related to sandbox escalation.",
+          "type": "boolean"
+        },
+        "skill_approval": {
+          "default": false,
+          "description": "Reject approval prompts triggered by skill script execution.",
           "type": "boolean"
         }
       },
@@ -9374,6 +9445,10 @@
                     "type": "boolean"
                   },
                   "sandbox_approval": {
+                    "type": "boolean"
+                  },
+                  "skill_approval": {
+                    "default": false,
                     "type": "boolean"
                   }
                 },
@@ -12820,6 +12895,10 @@
               "array",
               "null"
             ]
+          },
+          "forceRemoteSync": {
+            "description": "When true, reconcile the official curated marketplace against the remote plugin state before listing marketplaces.",
+            "type": "boolean"
           }
         },
         "title": "PluginListParams",
@@ -12833,6 +12912,12 @@
               "$ref": "#/definitions/v2/PluginMarketplaceEntry"
             },
             "type": "array"
+          },
+          "remoteSyncError": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -15126,6 +15211,9 @@
               "string",
               "null"
             ]
+          },
+          "ephemeral": {
+            "type": "boolean"
           },
           "model": {
             "description": "Configuration overrides for the forked thread, if any.",

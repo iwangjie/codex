@@ -1,6 +1,8 @@
 const __codexEnabledTools = __CODE_MODE_ENABLED_TOOLS_PLACEHOLDER__;
-const __codexEnabledToolNames = __codexEnabledTools.map((tool) => tool.name);
-const __codexContentItems = [];
+const __codexEnabledToolNames = __codexEnabledTools.map((tool) => tool.tool_name);
+const __codexContentItems = Array.isArray(globalThis.__codexContentItems)
+  ? globalThis.__codexContentItems
+  : [];
 
 function __codexCloneContentItem(item) {
   if (!item || typeof item !== 'object') {
@@ -22,11 +24,18 @@ function __codexCloneContentItem(item) {
   }
 }
 
-function __codexNormalizeContentItems(value) {
+function __codexNormalizeRawContentItems(value) {
   if (Array.isArray(value)) {
-    return value.flatMap((entry) => __codexNormalizeContentItems(entry));
+    return value.flatMap((entry) => __codexNormalizeRawContentItems(entry));
   }
   return [__codexCloneContentItem(value)];
+}
+
+function __codexNormalizeContentItems(value) {
+  if (typeof value === 'string') {
+    return [{ type: 'input_text', text: value }];
+  }
+  return __codexNormalizeRawContentItems(value);
 }
 
 Object.defineProperty(globalThis, '__codexContentItems', {
